@@ -2,84 +2,120 @@
 <html lang="fr">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial=1" />
-  <title>exAO — Mouvement balle</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>exAO — Vidéo - Le mouvement</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 
 <body>
-<header>
-  <h1>exAO — Enregistrement & analyse du mouvement d’une balle</h1>
-</header>
+  <header>
+    <h1>exAO - Enregistrement mouvement d'une balle et traitement de données</h1>
+  </header>
 
-<main>
-<section id="recorder">
+  <main>
 
-  <div class="camRow">
-    <video id="preview" autoplay playsinline muted width="640" height="480"></video>
-    <canvas id="previewCanvas" width="640" height="480"></canvas>
-  </div>
+    <!-- ============================
+         SECTION ENREGISTREMENT
+         ============================ -->
+    <section id="recorder">
 
-  <div class="controls">
-      <button id="startRecBtn">Démarrer enregistrement</button>
-      <button id="stopRecBtn" disabled>Arrêter</button>
+      <div class="camRow">
+        <video id="preview" autoplay playsinline muted width="640" height="480"></video>
+        <canvas id="previewCanvas" width="640" height="480"></canvas>
+      </div>
 
-      <button id="loadFileBtn">Charger vidéo</button>
-      <input id="fileInput" type="file" accept="video/*" style="display:none"/>
-  </div>
+      <div class="controls">
+        <button id="startRecBtn">Démarrer enregistrement</button>
+        <button id="stopRecBtn" disabled>Arrêter</button>
+        <button id="loadFileBtn">Charger fichier vidéo</button>
+        <input id="fileInput" type="file" accept="video/*" style="display:none"/>
+      </div>
 
-  <div class="meta">
-      <label>Angle α (°) :
-        <input id="angleInput" type="number" value="10" step="0.1"/>
-      </label>
+      <!-- MÉTADONNÉES + ÉTALONNAGE -->
+      <div class="meta">
+        <label>
+          Angle α (deg):
+          <input id="angleInput" type="number" value="10" step="0.1" />
+        </label>
 
-      <label>Diamètre balle (m) :
-        <input id="ballDiameter" type="number" value="0.15" step="0.001"/>
-      </label>
+        <!-- Distance supprimée en cas de calibrage automatique 15 cm ?
+             On la laisse pour l'instant mais script pourra l’ignorer -->
+        <label>
+          Distance d'étalonnage (m):
+          <input id="scaleMeters" type="number" value="0.15" step="0.01" />
+        </label>
 
-      <button id="calibrateBallBtn">Étalonner automatiquement</button>
+        <button id="calibrateBtn">Étalonner (cliquer 2 points sur la vidéo)</button>
 
-      <label>Pas d’analyse (ms) :
-        <input id="frameStepMs" type="number" value="10"/>
-      </label>
-  </div>
+        <div>
+          Pas de traitement (ms):
+          <input id="frameStepMs" type="number" value="10" step="1"/> ms
+        </div>
+      </div>
 
-  <p id="recState">État : inactif</p>
-  <button id="processBtn" disabled>Traiter</button>
+      <!-- INFOS ENREGISTREMENT -->
+      <div class="recordInfo">
+        <p id="recState">État : inactif</p>
+        <p id="blobSize"></p>
 
-</section>
+        <button id="processBtn" disabled>Traiter la vidéo enregistrée</button>
 
-<section id="results">
-  <h2>Résultats</h2>
+        <!-- ⭐ NOUVEAU bouton "Ralenti analyse" -->
+        <button id="slowMoBtn" disabled>Ralenti analyse ×0.25</button>
+      </div>
 
-  <div id="info">
-    <p>Échantillons: <span id="nSamples">0</span></p>
-    <p>Accélération estimée a (m/s²): <span id="aEstimated">—</span></p>
-    <p>Théorique a = 9.8·sin(α): <span id="aTheory">—</span></p>
-  </div>
+    </section>
 
-  <canvas id="posChart"></canvas>
-  <canvas id="velChart"></canvas>
+    <!-- ============================
+         SECTION RÉSULTATS
+         ============================ -->
+    <section id="results">
+      <h2>Données & Graphiques</h2>
 
-  <h3>Régression v = a·t</h3>
-  <p id="regEquation">—</p>
-  <canvas id="fitChart"></canvas>
+      <div id="info">
+        <p>Échantillons: <span id="nSamples">0</span></p>
+        <p>Estimation a (contrainte a, m/s²): <span id="aEstimated">—</span></p>
+        <p>Théorique a = 9.8·sin(α): <span id="aTheory">—</span></p>
+      </div>
 
-  <h3>Données</h3>
-  <table id="dataTable">
-    <thead>
-      <tr><th>t (s)</th><th>x (m)</th><th>y (m)</th><th>v (m/s)</th></tr>
-    </thead>
-    <tbody></tbody>
-  </table>
+      <!-- GRAPHIQUE POSITION -->
+      <canvas id="posChart"></canvas>
 
-  <button id="exportCSVBtn">Exporter CSV</button>
-</section>
-</main>
+      <!-- GRAPHIQUE VITESSE -->
+      <canvas id="velChart"></canvas>
 
-<footer><small>exAO — version balle unique</small></footer>
+      <h3>Droite d'ajustement (v = a·t)</h3>
+      <p id="regEquation">Équation : —</p>
 
-<script src="script.js"></script>
+      <canvas id="fitChart"></canvas>
+
+      <!-- TABLEAU -->
+      <h3>Tableau (extrait)</h3>
+
+      <table id="dataTable">
+        <thead>
+          <tr>
+            <th>t (s)</th>
+            <th>x (m)</th>
+            <th>y (m)</th>
+            <th>v (m/s)</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+
+      <div class="export">
+        <button id="exportCSVBtn">Exporter CSV</button>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <small>Basé sur l'exemple fourni.</small>
+  </footer>
+
+  <script src="script.js"></script>
 </body>
 </html>
