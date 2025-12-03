@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>exAO — Vidéo - Le mouvement</title>
+  <title>exAO — Vidéo - Le mouvement (une seule balle)</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-  <header><h1>exAO - Enregistrement mouvement d'une balle et traitement de données</h1></header>
+  <header><h1>exAO - Enregistrement mouvement d'une balle et traitement de données (1 balle)</h1></header>
 
   <main>
     <section id="recorder">
@@ -26,9 +26,9 @@
 
       <div class="meta">
         <label>Angle α (deg): <input id="angleInput" type="number" value="10" step="0.1" /></label>
-        <label>Distance d'étalonnage (m): <input id="scaleMeters" type="number" value="0.5" step="0.01" /></label>
-        <button id="calibrateBtn">Étalonner (cliquer 2 points sur la vidéo)</button>
+        <label>Diamètre balle (m): <input id="ballDiameter" type="number" value="0.15" step="0.01" /></label>
         <div>Pas de traitement (ms): <input id="frameStepMs" type="number" value="10" step="1"/> ms</div>
+        <div><small>Calibrage automatique : le script estime le diamètre en pixels sur les premières images et calcule px→m.</small></div>
       </div>
 
       <div class="recordInfo">
@@ -44,18 +44,19 @@
         <p>Échantillons: <span id="nSamples">0</span></p>
         <p>Estimation a (contrainte a, m/s²): <span id="aEstimated">—</span></p>
         <p>Théorique a = 9.8·sin(α): <span id="aTheory">—</span></p>
+        <p>Calibration px→m : <span id="pxToMeterDisplay">—</span></p>
       </div>
 
       <canvas id="posChart"></canvas>
       <canvas id="velChart"></canvas>
 
-      <h3>Droite d'ajustement (v = a·t)</h3>
+      <h3>Droite d'ajustement (v = a·t + b)</h3>
       <p id="regEquation">Équation : —</p>
       <canvas id="fitChart"></canvas>
 
       <h3>Tableau (extrait)</h3>
       <table id="dataTable">
-        <thead><tr><th>t (s)</th><th>x_v</th><th>y_v</th><th>x_p</th><th>y_p</th><th>v_v</th></tr></thead>
+        <thead><tr><th>t (s)</th><th>x</th><th>y</th><th>v (m/s)</th></tr></thead>
         <tbody></tbody>
       </table>
 
@@ -66,7 +67,7 @@
   </main>
 
   <footer>
-    <small>Basé sur l'exemple fourni.</small>
+    <small>Basé sur l'exemple fourni — modifié pour 1 balle et calibrage auto (diamètre par défaut 0.15 m).</small>
   </footer>
 
   <script src="script.js"></script>
