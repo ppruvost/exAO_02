@@ -1,330 +1,367 @@
-//-----------------------------------------------------
-// VARIABLES
-//-----------------------------------------------------
+/************************************************************
+ * exAO – Analyse du mouvement d’une balle
+ * Version : unique balle + couleur RGB (230,190,40)
+ * Calibrage automatique : diamètre réel = 0.15 m
+ * Ajout bouton "Ralenti analyse ×0.25"
+ ************************************************************/
+
+// --- Variables globales ---
 let mediaRecorder;
 let recordedChunks = [];
 let recordedBlob = null;
+let videoURL = null;
 
-let video = null;
-let canvas = null;
-let ctx = null;
+let pxToMeter = null;        // conversion pixels → mètres
+const REAL_DIAM = 0.15;      // diamètre réel = 15 cm
 
-let pxToMeter = 1;         // sera déterminé automatiquement
-let samples = [];
-let playing = false;
-let startTime = 0;
+let samples = [];            // mesures (t, x, y, v)
+let slowMotionFactor = 1;    // 1 = normal ; 0.25 = ralenti
 
-// Couleur balle :
-const BALL_R = 230, BALL_G = 190, BALL_B = 40;
+// --- Récupération des éléments DOM ---
+const preview = document.getElementById("preview");
+const previewCanvas = document.getElementById("previewCanvas");
+const ctx = previewCanvas.getContext("2d");
 
-//-----------------------------------------------------
-// INIT
-//-----------------------------------------------------
-window.addEventListener("load", () => {
-  video = document.getElementById("preview");
-  canvas = document.getElementById("previewCanvas");
-  ctx = canvas.getContext("2d");
+const startBtn = document.getElementById("startRecBtn");
+const stopBtn = document.getElementById("stopRecBtn");
+const loadBtn = document.getElementById("loadFileBtn");
+const fileInput = document.getElementById("fileInput");
 
-  document.getElementById("startRecBtn").onclick = startRecording;
-  document.getElementById("stopRecBtn").onclick = stopRecording;
-  document.getElementById("processBtn").onclick = processVideo;
+const processBtn = document.getElementById("processBtn");
+const slowMoBtn = document.getElementById("slowMoBtn");
 
-  document.getElementById("loadFileBtn").onclick = () =>
-      document.getElementById("fileInput").click();
+const frameStepMs = document.getElementById("frameStepMs");
+const angleInput = document.getElementById("angleInput");
 
-  document.getElementById("fileInput").onchange = loadVideoFile;
+// --- Chart.js graphiques ---
+let posChart, velChart, fitChart;
 
-  document.getElementById("calibrateBallBtn").onclick = calibrateBallDiameter;
-});
 
-//-----------------------------------------------------
-// WEBCAM RECORDING
-//-----------------------------------------------------
-async function startRecording(){
-  const stream = await navigator.mediaDevices.getUserMedia({ video:true });
-  video.srcObject = stream;
+/************************************************************
+ * 1. Démarrage de la caméra
+ ************************************************************/
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480 }
+    });
+    preview.srcObject = stream;
+  } catch (e) {
+    alert("Erreur accès caméra");
+  }
+}
+startCamera();
 
-  mediaRecorder = new MediaRecorder(stream);
+
+/************************************************************
+ * 2. Enregistrement vidéo
+ ************************************************************/
+startBtn.addEventListener("click", () => {
+  const stream = preview.srcObject;
   recordedChunks = [];
 
+  mediaRecorder = new MediaRecorder(stream, { mimeType: "video/webm" });
+
   mediaRecorder.ondataavailable = e => recordedChunks.push(e.data);
+
   mediaRecorder.onstop = () => {
-    recordedBlob = new Blob(recordedChunks, {type:"video/webm"});
-    document.getElementById("processBtn").disabled = false;
+    recordedBlob = new Blob(recordedChunks, { type: "video/webm" });
+    videoURL = URL.createObjectURL(recordedBlob);
+    processBtn.disabled = false;
+    slowMoBtn.disabled = false;
   };
 
   mediaRecorder.start();
-  document.getElementById("startRecBtn").disabled = true;
-  document.getElementById("stopRecBtn").disabled = false;
-}
+  document.getElementById("recState").textContent = "État : enregistrement…";
 
-function stopRecording(){
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+});
+
+stopBtn.addEventListener("click", () => {
   mediaRecorder.stop();
-  document.getElementById("startRecBtn").disabled = false;
-  document.getElementById("stopRecBtn").disabled = true;
+  document.getElementById("recState").textContent = "État : arrêté";
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+});
+
+
+/************************************************************
+ * 3. Import d’un fichier vidéo
+ ************************************************************/
+loadBtn.addEventListener("click", () => fileInput.click());
+
+fileInput.addEventListener("change", () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+  recordedBlob = file;
+  videoURL = URL.createObjectURL(file);
+  processBtn.disabled = false;
+  slowMoBtn.disabled = false;
+});
+
+
+/************************************************************
+ * 4. Détection d’une balle (RGB ≈ 230,190,40)
+ *    Utilise HSV plutôt que RGB direct
+ ************************************************************/
+function rgbToHsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+
+  let max = Math.max(r, g, b),
+      min = Math.min(r, g, b);
+  let h, s, v = max;
+
+  let d = max - min;
+  s = max === 0 ? 0 : d / max;
+
+  if (max === min) h = 0;
+  else {
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 1); break;
+      case g: h = (b - r) / d + 2; break;
+      case b: h = (r - g) / d + 4; break;
+    }
+    h /= 6;
+  }
+  return { h: h * 360, s, v };
 }
 
-//-----------------------------------------------------
-// LOAD VIDEO FILE
-//-----------------------------------------------------
-function loadVideoFile(){
-  const file = this.files[0];
-  if(!file) return;
-  recordedBlob = URL.createObjectURL(file);
-  document.getElementById("processBtn").disabled = false;
-}
+function detectBall(imgData) {
+  const data = imgData.data;
+  const W = imgData.width;
+  const H = imgData.height;
 
-//-----------------------------------------------------
-// CALIBRATION AUTOMATIQUE (diamètre connu = 15 cm)
-//-----------------------------------------------------
-function calibrateBallDiameter(){
-  if(!recordedBlob){ alert("Charge une vidéo d’abord."); return; }
-
-  const tempVid = document.createElement("video");
-  tempVid.src = recordedBlob;
-  tempVid.muted = true;
-
-  tempVid.onloadeddata = () => {
-    tempVid.currentTime = 0;
-
-    tempVid.onseeked = () => {
-      const tmpCanvas = document.createElement("canvas");
-      tmpCanvas.width = tempVid.videoWidth;
-      tmpCanvas.height = tempVid.videoHeight;
-      const tctx = tmpCanvas.getContext("2d");
-
-      tctx.drawImage(tempVid,0,0);
-
-      const frame = tctx.getImageData(
-         0,0,tmpCanvas.width,tmpCanvas.height
-      );
-
-      const pix = detectBall(frame);
-      if(!pix) {
-        alert("Impossible de détecter la balle pour l’étalonnage.");
-        return;
-      }
-
-      const diameterMeters = parseFloat(document.getElementById("ballDiameter").value);
-
-      // mesure du diamètre apparent (pixels)
-      const dPix = estimateBallDiameter(frame, pix);
-
-      pxToMeter = diameterMeters / dPix;
-      alert("Étalonnage OK : " + pxToMeter.toFixed(6)+ " m/px");
-    };
-  };
-}
-
-//-----------------------------------------------------
-// BALLE → position barycentre (détection par couleur cible)
-//-----------------------------------------------------
-function detectBall(img){
-  const data = img.data;
-  const W = img.width;
-  const H = img.height;
-
-  let sx = 0, sy = 0, n = 0;
+  let sumX = 0, sumY = 0, count = 0;
 
   const stride = 2;
 
-  for(let y=0;y<H;y+=stride){
-    for(let x=0;x<W;x+=stride){
+  for (let y = 0; y < H; y += stride) {
+    for (let x = 0; x < W; x += stride) {
 
-      const i = (y*W + x)*4;
-      const r=data[i], g=data[i+1], b=data[i+2];
+      const i = (y * W + x) * 4;
+      const r = data[i];
+      const g = data[i+1];
+      const b = data[i+2];
 
-      // distance RGB simple
-      const dr = r - BALL_R;
-      const dg = g - BALL_G;
-      const db = b - BALL_B;
-      const dist = dr*dr + dg*dg + db*db;
+      const hsv = rgbToHsv(r, g, b);
 
-      // seuil tolérant
-      if(dist < 2500){   // <<< ajustable
-        sx += x;
-        sy += y;
-        n++;
-      }
-    }
-  }
+      // Détection autour de RGB(230,190,40)
+      const ok =
+        hsv.h >= 30 && hsv.h <= 55 &&
+        hsv.s >= 0.35 && hsv.s <= 0.75 &&
+        hsv.v >= 0.55 && hsv.v <= 1.00;
 
-  if(n===0) return null;
-  return {x: sx/n, y: sy/n};
-}
-
-//-----------------------------------------------------
-// ESTIMATION DIAMÈTRE EN PIXELS
-//-----------------------------------------------------
-function estimateBallDiameter(img, center){
-  const data = img.data;
-  const W = img.width;
-  const H = img.height;
-
-  const cx = Math.round(center.x);
-  const cy = Math.round(center.y);
-
-  let count = 0;
-  let xmin=9999,xmax=-1, ymin=9999,ymax=-1;
-
-  for(let y=cy-50; y<=cy+50; y++){
-    for(let x=cx-50; x<=cx+50; x++){
-      if(x<0||y<0||x>=W||y>=H) continue;
-
-      const i = (y*W+x)*4;
-      const r=data[i], g=data[i+1], b=data[i+2];
-
-      const dr=r-BALL_R, dg=g-BALL_G, db=b-BALL_B;
-      if(dr*dr+dg*dg+db*db < 2500){
-        if(x<xmin) xmin=x;
-        if(x>xmax) xmax=x;
-        if(y<ymin) ymin=y;
-        if(y>ymax) ymax=y;
+      if (ok) {
+        sumX += x;
+        sumY += y;
         count++;
       }
     }
   }
 
-  const dx = xmax - xmin;
-  const dy = ymax - ymin;
-  return Math.max(dx, dy);
-}
+  if (count === 0) return null;
 
-//-----------------------------------------------------
-// PROCESSING VIDEO
-//-----------------------------------------------------
-function processVideo(){
-  samples=[];
-  const v2=document.createElement("video");
-  v2.src = recordedBlob;
-  v2.muted = true;
-
-  v2.onloadeddata = () => {
-    v2.play();
-    startTime = performance.now();
-    playing=true;
-    stepFrame(v2);
+  return {
+    x: sumX / count,
+    y: sumY / count
   };
 }
 
-function stepFrame(v2){
-  if(!playing) return;
 
-  const now = performance.now();
-  const t = (now - startTime)/1000;
+/************************************************************
+ * 5. Calibrage automatique (avec diamètre réel 15 cm)
+ ************************************************************/
+function autoCalibrateDiameter(imgData) {
+  const W = imgData.width;
+  const H = imgData.height;
 
-  ctx.drawImage(v2,0,0,canvas.width,canvas.height);
-  const frame = ctx.getImageData(0,0,canvas.width,canvas.height);
+  let pixels = [];
 
-  const pos = detectBall(frame);
-  let x=NaN, y=NaN;
+  for (let y = 0; y < H; y += 1) {
+    for (let x = 0; x < W; x += 1) {
 
-  if(pos){
-    x = pos.x * pxToMeter;
-    y = pos.y * pxToMeter;
+      const i = (y * W + x) * 4;
+      const r = imgData.data[i];
+      const g = imgData.data[i+1];
+      const b = imgData.data[i+2];
+
+      const hsv = rgbToHsv(r, g, b);
+      const ok =
+        hsv.h >= 30 && hsv.h <= 55 &&
+        hsv.s >= 0.35 && hsv.s <= 0.75 &&
+        hsv.v >= 0.55 && hsv.v <= 1.00;
+
+      if (ok) pixels.push({x,y});
+    }
   }
 
-  samples.push({t,x,y});
+  if (pixels.length < 50) return null;
 
-  if(v2.ended){
-    playing=false;
-    computeVelocity();
-    updateCharts();
-    updateTable();
-    return;
+  let minX = Infinity, maxX = -1;
+  let minY = Infinity, maxY = -1;
+
+  for (let p of pixels) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
   }
 
-  const step = parseInt(document.getElementById("frameStepMs").value);
-  setTimeout(()=>stepFrame(v2), step);
+  const diameterPx = Math.max(maxX - minX, maxY - minY);
+
+  return REAL_DIAM / diameterPx;
 }
 
-//-----------------------------------------------------
-// VELOCITY
-//-----------------------------------------------------
-function computeVelocity(){
-  for(let i=1;i<samples.length;i++){
+
+/************************************************************
+ * 6. Traitement vidéo
+ ************************************************************/
+processBtn.addEventListener("click", async () => {
+  samples = [];
+
+  const video = document.createElement("video");
+  video.src = videoURL;
+  await video.play();
+
+  const step = Number(frameStepMs.value) / 1000;
+
+  return new Promise(resolve => {
+    video.onseeked = () => {
+      previewCtxDraw();
+    };
+
+    function previewCtxDraw() {
+      ctx.drawImage(video, 0, 0);
+      const img = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+
+      // calibrage automatique UNE SEULE FOIS
+      if (!pxToMeter) {
+        pxToMeter = autoCalibrateDiameter(img);
+      }
+
+      const pos = detectBall(img);
+      if (pos && pxToMeter) {
+        const t = video.currentTime;
+        samples.push({
+          t: t * slowMotionFactor,
+          x: pos.x * pxToMeter,
+          y: pos.y * pxToMeter
+        });
+      }
+
+      if (video.currentTime < video.duration) {
+        video.currentTime += step;
+      } else {
+        updateAll();
+        resolve();
+      }
+    }
+
+    video.currentTime = 0;
+  });
+});
+
+
+/************************************************************
+ * 7. Calcul vitesses + régression
+ ************************************************************/
+function updateAll() {
+  // calcul vitesses
+  for (let i = 1; i < samples.length; i++) {
     const dt = samples[i].t - samples[i-1].t;
-    if(dt>0){
-      const dy = samples[i].y - samples[i-1].y;
-      samples[i].v = dy/dt;
-    } else samples[i].v=0;
+    const dy = samples[i].y - samples[i-1].y;
+    samples[i].v = dy / dt;
   }
-  samples[0].v=0;
+
+  buildCharts();
 }
 
-//-----------------------------------------------------
-// CHARTS
-//-----------------------------------------------------
-let posChart=null, velChart=null, fitChart=null;
 
-function updateCharts(){
-  document.getElementById("nSamples").textContent = samples.length;
+/************************************************************
+ * 8. Affichage Chart.js
+ ************************************************************/
+function buildCharts() {
 
-  // données
-  const t = samples.map(s=>s.t);
-  const y = samples.map(s=>s.y);
-  const v = samples.map(s=>s.v);
+  const T = samples.map(s => s.t);
+  const Y = samples.map(s => s.y);
+  const V = samples.map(s => s.v);
 
-  const angle = parseFloat(document.getElementById("angleInput").value);
-  const atheo = 9.8*Math.sin(angle*Math.PI/180);
-  document.getElementById("aTheory").textContent = atheo.toFixed(3);
-
-  // régression v=a t
-  let sumt=0,sumv=0,sumtt=0,sumtv=0,n=0;
-  samples.forEach(s=>{
-    if(Number.isFinite(s.v)){
-      n++;
-      sumt+=s.t; sumv+=s.v; sumtt+=s.t*s.t; sumtv+=s.t*s.v;
+  // Position
+  if (posChart) posChart.destroy();
+  posChart = new Chart(document.getElementById("posChart"), {
+    type: "line",
+    data: {
+      labels: T,
+      datasets: [{
+        label: "Position (m)",
+        data: Y
+      }]
     }
   });
 
-  const a = (n*sumtv - sumt*sumv)/(n*sumtt - sumt*sumt);
-  document.getElementById("aEstimated").textContent = a?.toFixed(3) ?? "—";
+  // Vitesse
+  if (velChart) velChart.destroy();
+  velChart = new Chart(document.getElementById("velChart"), {
+    type: "line",
+    data: {
+      labels: T,
+      datasets: [{
+        label: "Vitesse (m/s)",
+        data: V
+      }]
+    }
+  });
+
+  // Ajustement linéaire
+  const a = regressionSlope(T, V);
   document.getElementById("regEquation").textContent =
-    "v = " + a.toFixed(3) + " · t";
+    "v = " + a.toFixed(3) + "·t";
 
-  // position
-  if(posChart) posChart.destroy();
-  posChart = new Chart(document.getElementById("posChart"),{
-    type:"line",
-    data:{labels:t, datasets:[{label:"y (m)", data:y}]},
-    options:{responsive:true}
-  });
-
-  // vitesse
-  if(velChart) velChart.destroy();
-  velChart = new Chart(document.getElementById("velChart"),{
-    type:"line",
-    data:{labels:t, datasets:[{label:"v (m/s)", data:v}]},
-    options:{responsive:true}
-  });
-
-  // ajustement
-  const fit = t.map(tt=>a*tt);
-  if(fitChart) fitChart.destroy();
-  fitChart = new Chart(document.getElementById("fitChart"),{
-    type:"line",
-    data:{labels:t, datasets:[
-      {label:"v mesurée", data:v},
-      {label:"v = a·t", data:fit}
-    ]},
-    options:{responsive:true}
+  if (fitChart) fitChart.destroy();
+  fitChart = new Chart(document.getElementById("fitChart"), {
+    type: "scatter",
+    data: {
+      datasets: [
+        {
+          label: "Vitesse",
+          data: T.map((t,i)=>({x:t,y:V[i]}))
+        },
+        {
+          label: "Ajustement",
+          type: "line",
+          data: T.map(t=>({x:t,y:a*t}))
+        }
+      ]
+    }
   });
 }
 
-//-----------------------------------------------------
-// TABLE
-//-----------------------------------------------------
-function updateTable(){
-  const tbody=document.querySelector("#dataTable tbody");
-  tbody.innerHTML="";
-  for(const s of samples){
-    const tr=document.createElement("tr");
-    tr.innerHTML =
-      `<td>${s.t.toFixed(3)}</td>
-       <td>${Number.isFinite(s.x)?s.x.toFixed(4):""}</td>
-       <td>${Number.isFinite(s.y)?s.y.toFixed(4):""}</td>
-       <td>${Number.isFinite(s.v)?s.v.toFixed(4):""}</td>`;
-    tbody.appendChild(tr);
+// régression simple
+function regressionSlope(T, V) {
+  let n = T.length;
+  let sumT = 0, sumV = 0, sumTV = 0, sumT2 = 0;
+
+  for (let i = 0; i < n; i++) {
+    sumT += T[i];
+    sumV += V[i];
+    sumTV += T[i] * V[i];
+    sumT2 += T[i] * T[i];
   }
+
+  return (n * sumTV - sumT * sumV) / (n * sumT2 - sumT * sumT);
 }
+
+
+/************************************************************
+ * 9. Bouton Ralenti analyse ×0.25
+ ************************************************************/
+slowMoBtn.addEventListener("click", () => {
+  if (slowMotionFactor === 1) {
+    slowMotionFactor = 0.25;
+    slowMoBtn.textContent = "Ralenti analyse ×1 (normal)";
+  } else {
+    slowMotionFactor = 1;
+    slowMoBtn.textContent = "Ralenti analyse ×0.25";
+  }
+});
