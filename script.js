@@ -481,6 +481,167 @@ slowMoBtn.addEventListener("click", ()=>{
     slowMoBtn.textContent = "Ralenti ×0.25";
   }
 });
+/* =========================================================
+   Graphiques type Python (TP_2REMI_mvt23.py)
+   Document 1 – MRU + MRUV (vue de dessus)
+   Document 2 – MRU (régression linéaire)
+   Document 3 – MRUV (régression quadratique)
+   ========================================================= */
+
+let doc1Chart = null, doc2Chart = null, doc3Chart = null;
+
+/* ------------------------------
+   Document 1 : MRU + MRUV
+   ------------------------------ */
+function buildDoc1_MRU_MRUV(samples){
+    const canvas = document.getElementById("doc1Chart");
+    if (doc1Chart) doc1Chart.destroy();
+
+    const X_MRU  = samples.map(s => s.x);   // selon ton modèle → x = MRU
+    const X_MRUV = samples.map(s => s.y);   // y = MRUV
+
+    doc1Chart = new Chart(canvas, {
+        type: "scatter",
+        data: {
+            datasets: [
+                {
+                    label: "MRU (m)",
+                    data: X_MRU.map(v => ({x:v, y:0.52})),
+                    pointRadius: 6,
+                    backgroundColor: "red"
+                },
+                {
+                    label: "MRUV (m)",
+                    data: X_MRUV.map(v => ({x:v, y:0.38})),
+                    pointRadius: 6,
+                    backgroundColor: "blue"
+                }
+            ]
+        },
+        options:{
+            responsive:true,
+            plugins:{ legend:{ position:"top" } },
+            scales:{
+                x:{ title:{display:true, text:"Distance (m)"} },
+                y:{ display:false }
+            }
+        }
+    });
+}
+
+/* ------------------------------
+   Document 2 : MRU régression linéaire
+   ------------------------------ */
+function buildDoc2_MRU(samples){
+    const canvas = document.getElementById("doc2Chart");
+    if (doc2Chart) doc2Chart.destroy();
+
+    const T = samples.map(s => s.t);
+    const X = samples.map(s => s.x);
+
+    // régression linéaire
+    let n=T.length, sumT=0,sumX=0,sumTT=0,sumTX=0;
+    for(let i=0;i<n;i++){
+        sumT += T[i];
+        sumX += X[i];
+        sumTT += T[i]*T[i];
+        sumTX += T[i]*X[i];
+    }
+
+    const slope = (n*sumTX - sumT*sumX) / (n*sumTT - sumT*sumT);
+    const intercept = (sumX - slope*sumT)/n;
+
+    const fit = T.map(t => slope*t + intercept);
+
+    doc2Chart = new Chart(canvas, {
+        type:"line",
+        data:{
+            labels:T,
+            datasets:[
+                { label:"Données MRU", data:X, pointRadius:4, borderColor:"red", fill:false },
+                { label:`v = ${slope.toFixed(2)} m/s`, data:fit, borderColor:"darkred", fill:false }
+            ]
+        },
+        options:{
+            scales:{
+                x:{ title:{display:true,text:"Temps (s)"} },
+                y:{ title:{display:true,text:"Position (m)"} }
+            }
+        }
+    });
+}
+
+/* ------------------------------
+   Document 3 : MRUV régression poly2
+   ------------------------------ */
+function buildDoc3_MRUV(samples){
+    const canvas = document.getElementById("doc3Chart");
+    if (doc3Chart) doc3Chart.destroy();
+
+    const T = samples.map(s => s.t);
+    const X = samples.map(s => s.y);
+
+    // système de régression quadratique : A t² + B t + C
+    let n=T.length;
+    let S0=n, S1=0, S2=0, S3=0, S4=0, SX=0, STX=0, ST2X=0;
+
+    for(let i=0;i<n;i++){
+        const t=T[i], x=X[i], t2=t*t;
+        S1+=t; S2+=t2; S3+=t2*t; S4+=t2*t2;
+        SX+=x; STX+=t*x; ST2X+=t2*x;
+    }
+
+    function solve3(M,V){
+        const [a,b,c] = M[0];
+        const [d,e,f] = M[1];
+        const [g,h,i] = M[2];
+        const det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g);
+        if (Math.abs(det)<1e-12) return [0,0,0];
+
+        return [
+            (V[0]*(e*i - f*h) - b*(V[1]*i - f*V[2]) + c*(V[1]*h - e*V[2]))/det,
+            (a*(V[1]*i - f*V[2]) - V[0]*(d*i - f*g) + c*(d*V[2] - V[1]*g))/det,
+            (a*(e*V[2] - V[1]*h) - b*(d*V[2] - V[1]*g) + V[0]*(d*h - e*g))/det
+        ];
+    }
+
+    const M = [
+        [S4,S3,S2],
+        [S3,S2,S1],
+        [S2,S1,S0]
+    ];
+    const V = [ST2X, STX, SX];
+    const [A,B,C] = solve3(M,V);
+
+    const a = 2*A;
+    const fit = T.map(t => A*t*t + B*t + C);
+
+    doc3Chart = new Chart(canvas, {
+        type:"line",
+        data:{
+            labels:T,
+            datasets:[
+                { label:"Données MRUV", data:X, pointRadius:4, borderColor:"blue", fill:false },
+                { label:`a = ${a.toFixed(2)} m/s²`, data:fit, borderColor:"darkblue", fill:false }
+            ]
+        },
+        options:{
+            scales:{
+                x:{ title:{display:true,text:"Temps (s)"} },
+                y:{ title:{display:true,text:"Position (m)"} }
+            }
+        }
+    });
+}
+
+/* ------------------------------
+   Appel automatique dans finalize()
+   ------------------------------ */
+function buildPythonLikeVisuals(){
+    buildDoc1_MRU_MRUV(samplesFilt);
+    buildDoc2_MRU(samplesFilt);
+    buildDoc3_MRUV(samplesFilt);
+}
 
 /* -------------------------
    End of script
