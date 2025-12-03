@@ -46,3 +46,16 @@ table th, table td{
   border:1px solid #aaa;
   padding:4px;
 }
+#slowMoBtn {
+  background:#444;
+  color:white;
+  padding:8px 14px;
+  margin-left:10px;
+  border-radius:6px;
+  cursor:pointer;
+}
+
+#slowMoBtn:disabled {
+  opacity:0.5;
+  cursor:not-allowed;
+}
