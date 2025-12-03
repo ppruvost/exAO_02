@@ -213,17 +213,16 @@ function autoCalibrateDiameter(imgData) {
   return REAL_DIAM / diameterPx;
 }
 
-
 /************************************************************
- * 6. Traitement vidéo – VERSION CORRIGÉE
+ * 6. Traitement vidéo – VERSION FONCTIONNELLE
  ************************************************************/
 processBtn.addEventListener("click", async () => {
   samples = [];
+  pxToMeter = null; // recalibrage possible à chaque nouvelle vidéo
 
   const video = document.createElement("video");
   video.src = videoURL;
   video.muted = true;
-
   await video.play();
   video.pause();
 
@@ -231,37 +230,37 @@ processBtn.addEventListener("click", async () => {
 
   function processFrame() {
     if (video.currentTime >= video.duration) {
-      updateAll();
+      updateAll();   // termine l’analyse
       return;
     }
 
+    // Lire la frame dans le canvas
     ctx.drawImage(video, 0, 0);
     const img = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
 
-    // --- calibrage auto uniquement sur la première frame détectée ---
+    // Calibrage automatique basé sur diamètre balle
     if (!pxToMeter) {
       const cal = autoCalibrateDiameter(img);
       if (cal) pxToMeter = cal;
     }
 
-    // --- détection balle ---
+    // Détection balle
     const pos = detectBall(img);
     if (pos && pxToMeter) {
       samples.push({
-        t: video.currentTime * slowMotionFactor,
-        x: pos.x * pxToMeter,
-        y: pos.y * pxToMeter
+        t : video.currentTime,
+        x : pos.x * pxToMeter,
+        y : pos.y * pxToMeter
       });
     }
 
-    // --- frame suivante ---
+    // Passer à la frame suivante
     video.currentTime += step;
-    video.onseeked = processFrame;
   }
 
-  // lancement
-  video.currentTime = 0;
+  // Déclenchement du traitement image par image
   video.onseeked = processFrame;
+  video.currentTime = 0;
 });
 
 /************************************************************
