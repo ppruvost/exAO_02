@@ -1,61 +1,74 @@
-body{
+body {
   font-family: Arial, sans-serif;
   background:#fafafa;
   margin:0;
   padding:0;
 }
 
-header{
+header {
   background:#333;
   color:white;
-  padding:10px;
+  padding:12px;
 }
 
-main{
+main {
   width:90%;
   margin:auto;
 }
 
-.camRow{
+.camRow {
   display:flex;
   gap:10px;
   margin-top:10px;
 }
 
-.controls, .meta{
+video, canvas {
+  width:640px;
+  height:480px;
+  background:black;
+  border:1px solid #ccc;
+}
+
+.controls, .meta {
   margin-top:10px;
 }
 
-button{
+button {
   padding:6px 16px;
   margin-right:6px;
   cursor:pointer;
 }
 
-#results{
-  margin-top:40px;
-}
-
-table{
-  border-collapse:collapse;
-  width:100%;
-  margin-top:10px;
-}
-
-table th, table td{
-  border:1px solid #aaa;
-  padding:4px;
-}
 #slowMoBtn {
   background:#444;
   color:white;
   padding:8px 14px;
-  margin-left:10px;
   border-radius:6px;
-  cursor:pointer;
 }
 
 #slowMoBtn:disabled {
   opacity:0.5;
   cursor:not-allowed;
+}
+
+#results {
+  margin-top:40px;
+}
+
+canvas {
+  background:white;
+  border:1px solid #ccc;
+  margin-top:10px;
+  max-width:900px;
+}
+
+table {
+  border-collapse:collapse;
+  width:100%;
+  margin-top:10px;
+}
+
+table th, table td {
+  border:1px solid #aaa;
+  padding:4px;
 }
