@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>exAO — enregistrement puis traitement + ajustement</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <header><h1>exAO (enregistrer → traiter) — balle verte & rose + ajustement</h1></header>
+
+  <main>
+    <section id="recorder">
+      <div class="camRow">
+        <video id="preview" autoplay playsinline muted width="640" height="480"></video>
+        <canvas id="previewCanvas" width="640" height="480"></canvas>
+      </div>
+
+      <div class="controls">
+        <button id="startRecBtn">Démarrer enregistrement</button>
+        <button id="stopRecBtn" disabled>Arrêter</button>
+        <button id="loadFileBtn">Charger fichier vidéo</button>
+        <input id="fileInput" type="file" accept="video/*" style="display:none"/>
+      </div>
+
+      <div class="meta">
+        <label>Angle α (deg): <input id="angleInput" type="number" value="10" step="0.1" /></label>
+        <label>Distance d'étalonnage (m): <input id="scaleMeters" type="number" value="0.5" step="0.01" /></label>
+        <button id="calibrateBtn">Étalonner (cliquer 2 points sur la vidéo)</button>
+        <div>Pas de traitement (ms): <input id="frameStepMs" type="number" value="10" step="1"/> ms</div>
+      </div>
+
+      <div class="recordInfo">
+        <p id="recState">État : inactif</p>
+        <p id="blobSize"></p>
+        <button id="processBtn" disabled>Traiter la vidéo enregistrée</button>
+      </div>
+    </section>
+
+    <section id="results">
+      <h2>Données & Graphiques</h2>
+      <div id="info">
+        <p>Échantillons: <span id="nSamples">0</span></p>
+        <p>Estimation a (contrainte a, m/s²): <span id="aEstimated">—</span></p>
+        <p>Théorique a = 9.8·sin(α): <span id="aTheory">—</span></p>
+      </div>
+
+      <canvas id="posChart"></canvas>
+      <canvas id="velChart"></canvas>
+
+      <h3>Droite d'ajustement (v = a·t + b)</h3>
+      <p id="regEquation">Équation : —</p>
+      <canvas id="fitChart"></canvas>
+
+      <h3>Tableau (extrait)</h3>
+      <table id="dataTable">
+        <thead><tr><th>t (s)</th><th>x_v</th><th>y_v</th><th>x_p</th><th>y_p</th><th>v_v</th></tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <div class="export">
+        <button id="exportCSVBtn">Exporter CSV</button>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <small>Basé sur l'exemple fourni.</small>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
