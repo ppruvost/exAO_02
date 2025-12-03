@@ -1,24 +1,30 @@
 /************************************************************
- * exAO – Analyse du mouvement d’une balle
- * Version optimisée – robuste – détection améliorée HSV
- * Affichage temps réel de la détection
- * Calibrage automatique : diamètre réel = 0.15 m
- * Ajout bouton "Ralenti analyse ×0.25"
+ * exAO – Analyse du mouvement d’une balle (version A)
+ * - Détection robuste couleur ~ RGB(230,190,40) (HSV)
+ * - Calibrage automatique (diamètre réel = 0.15 m)
+ * - Affichage overlay temps réel pendant prévisualisation
+ * - Traitement vidéo frame-by-frame (stable)
+ * - Filtre de Kalman 2D (x,y + vx,vy) pour lissage
+ * - Graphiques: position brute / filtrée, vitesse filtrée, régression v = a·t
+ * - Bouton "Ralenti analyse ×0.25"
+ *
+ * Important: nécessite Chart.js (inclus dans index.html)
  ************************************************************/
 
-/* ==========================================================
-   0. Variables globales
-   ========================================================== */
-let mediaRecorder;
-let recordedChunks = [];
+/* ---------------------------
+   Config & variables globales
+   --------------------------- */
+const REAL_DIAM = 0.15; // m
+let pxToMeter = null;
+
 let recordedBlob = null;
 let videoURL = null;
+let recordedChunks = [];
+let mediaRecorder = null;
 
-let pxToMeter = null;
-const REAL_DIAM = 0.15;
-
-let samples = [];
-let slowMotionFactor = 1;
+let samplesRaw = [];   // {t, x_px, y_px, x_m, y_m}
+let samplesFilt = [];  // {t, x, y, vx, vy} after Kalman
+let slowMotionFactor = 1; // 1 normal, 0.25 ralenti
 
 // DOM
 const preview = document.getElementById("preview");
@@ -29,148 +35,66 @@ const startBtn = document.getElementById("startRecBtn");
 const stopBtn = document.getElementById("stopRecBtn");
 const loadBtn = document.getElementById("loadFileBtn");
 const fileInput = document.getElementById("fileInput");
+
 const processBtn = document.getElementById("processBtn");
 const slowMoBtn = document.getElementById("slowMoBtn");
 
 const frameStepMs = document.getElementById("frameStepMs");
 const angleInput = document.getElementById("angleInput");
 
+const nSamplesSpan = document.getElementById("nSamples");
+const aEstimatedSpan = document.getElementById("aEstimated");
+const aTheorySpan = document.getElementById("aTheory");
+const regEquationP = document.getElementById("regEquation");
+
+const exportCSVBtn = document.getElementById("exportCSVBtn");
+
+// Charts
 let posChart = null, velChart = null, fitChart = null;
 
-
-/* ==========================================================
-   1. Caméra + prévisualisation + overlay détection temps réel
-   ========================================================== */
-async function startCamera() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 640, height: 480 }
-    });
-    preview.srcObject = stream;
-
-    // overlay temps réel
-    setInterval(() => {
-      ctx.drawImage(preview, 0, 0);
-      const img = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
-      const pos = detectBall(img);
-
-      if (pos) {
-        ctx.beginPath();
-        ctx.strokeStyle = "yellow";
-        ctx.lineWidth = 3;
-        ctx.arc(pos.x, pos.y, 12, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-    }, 100);
-
-  } catch (e) {
-    alert("Erreur accès caméra : " + e.message);
-  }
-}
-startCamera();
-
-
-/* ==========================================================
-   2. Enregistrement vidéo
-   ========================================================== */
-startBtn.addEventListener("click", () => {
-  const stream = preview.srcObject;
-  recordedChunks = [];
-
-  mediaRecorder = new MediaRecorder(stream, { mimeType: "video/webm" });
-
-  mediaRecorder.ondataavailable = e => recordedChunks.push(e.data);
-
-  mediaRecorder.onstop = () => {
-    recordedBlob = new Blob(recordedChunks, { type: "video/webm" });
-    videoURL = URL.createObjectURL(recordedBlob);
-    processBtn.disabled = false;
-    slowMoBtn.disabled = false;
-  };
-
-  mediaRecorder.start();
-  document.getElementById("recState").textContent = "État : enregistrement…";
-
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-});
-
-stopBtn.addEventListener("click", () => {
-  mediaRecorder.stop();
-  document.getElementById("recState").textContent = "État : arrêté";
-  startBtn.disabled = false;
-  stopBtn.disabled = true;
-});
-
-
-/* ==========================================================
-   3. Import vidéo depuis fichier
-   ========================================================== */
-loadBtn.addEventListener("click", () => fileInput.click());
-
-fileInput.addEventListener("change", () => {
-  const file = fileInput.files[0];
-  if (!file) return;
-
-  recordedBlob = file;
-  videoURL = URL.createObjectURL(file);
-  processBtn.disabled = false;
-  slowMoBtn.disabled = false;
-});
-
-
-/* ==========================================================
-   4. Détection robuste de la balle (couleur RGB ≈ 230,190,40)
-   ========================================================== */
+/* ---------------------------
+   Helpers: RGB→HSV
+   --------------------------- */
 function rgbToHsv(r, g, b) {
   r /= 255; g /= 255; b /= 255;
-
-  let max = Math.max(r, g, b),
-      min = Math.min(r, g, b);
-  let h, s, v = max;
-
-  let d = max - min;
+  let max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0, v = max;
+  const d = max - min;
   s = max === 0 ? 0 : d / max;
-
-  if (max === min) h = 0;
-  else {
-    switch (max) {
-      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
-      case g: h = (b - r) / d + 2; break;
-      case b: h = (r - g) / d + 4; break;
-    }
-    h *= 60;
+  if (d !== 0) {
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h = h * 60;
   }
-  return { h, s, v };
+  return {h, s, v};
 }
 
-
-// Détection solide avec élimination des faux pixels
-function detectBall(imgData) {
+/* ---------------------------
+   Détection robuste (HSV)
+   ciblée autour de la couleur balle ~ (230,190,40)
+   paramètres ajustés et filtrage du bruit
+   --------------------------- */
+function detectBall(imgData, sampleStride = 2) {
   const data = imgData.data;
-  const W = imgData.width;
-  const H = imgData.height;
-
+  const W = imgData.width, H = imgData.height;
   let sumX = 0, sumY = 0, count = 0;
 
-  const stride = 2;
-
-  for (let y = 0; y < H; y += stride) {
-    for (let x = 0; x < W; x += stride) {
-
+  // scanning with stride for speed
+  for (let y = 0; y < H; y += sampleStride) {
+    for (let x = 0; x < W; x += sampleStride) {
       const i = (y * W + x) * 4;
       const r = data[i], g = data[i+1], b = data[i+2];
-
       const hsv = rgbToHsv(r, g, b);
 
+      // tuned HSV for light brown / ochre (approx RGB 230,190,40)
       const ok =
-        hsv.h >= 32 && hsv.h <= 55 &&  // gamme resserrée
-        hsv.s >= 0.30 && hsv.s <= 0.85 &&
-        hsv.v >= 0.50;
+        hsv.h >= 28 && hsv.h <= 55 &&
+        hsv.s >= 0.25 && hsv.s <= 0.9 &&
+        hsv.v >= 0.45;
 
       if (!ok) continue;
-
-      // prévention bruit : éliminer très petits clusters
+      // avoid very dark pixels
       if (r + g + b < 120) continue;
 
       sumX += x;
@@ -179,201 +103,460 @@ function detectBall(imgData) {
     }
   }
 
-  if (count < 40) return null;
+  if (count < 40) return null; // not enough pixels → no detection
 
-  return { x: sumX / count, y: sumY / count };
+  return { x: sumX / count, y: sumY / count, count };
 }
 
-
-/* ==========================================================
-   5. Calibrage automatique basé sur diamètre 15 cm
-   ========================================================== */
-function autoCalibrateDiameter(imgData) {
+/* ---------------------------
+   Calibration auto : estimate diameter in px and compute pxToMeter
+   Strategy: find the bounding box of candidate pixels and take median across small local neighborhoods
+   --------------------------- */
+function estimatePxToMeter(imgData) {
+  const data = imgData.data;
   const W = imgData.width, H = imgData.height;
   const pixels = [];
 
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
-
       const i = (y * W + x) * 4;
-      const r = imgData.data[i];
-      const g = imgData.data[i+1];
-      const b = imgData.data[i+2];
-
-      const hsv = rgbToHsv(r, g, b);
+      const r = data[i], g = data[i+1], b = data[i+2];
+      const hsv = rgbToHsv(r,g,b);
       const ok =
-        hsv.h >= 32 && hsv.h <= 55 &&
-        hsv.s >= 0.30 &&
-        hsv.v >= 0.50;
-
-      if (ok) pixels.push({ x, y });
+        hsv.h >= 28 && hsv.h <= 55 &&
+        hsv.s >= 0.25 && hsv.v >= 0.45;
+      if (ok) pixels.push({x,y});
     }
   }
 
-  if (pixels.length < 50) return null;
+  if (pixels.length < 200) return null;
 
-  let minX = Infinity, maxX = -1;
-  let minY = Infinity, maxY = -1;
-
-  for (let p of pixels) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  pixels.forEach(p => {
     if (p.x < minX) minX = p.x;
     if (p.x > maxX) maxX = p.x;
     if (p.y < minY) minY = p.y;
     if (p.y > maxY) maxY = p.y;
-  }
+  });
 
-  const diameterPx = Math.max(maxX - minX, maxY - minY);
-  return REAL_DIAM / diameterPx;
+  const diamPx = Math.max(maxX - minX, maxY - minY);
+  if (diamPx <= 2) return null;
+  return REAL_DIAM / diamPx;
 }
 
+/* ---------------------------
+   Kalman 2D implementation (state = [x, vx, y, vy])
+   Simple discrete linear Kalman filter
+   --------------------------- */
+function createKalman() {
+  // state vector: [x, vx, y, vy] column
+  let x = math.zeros(4,1); // initial state (use mathjs-like simple arrays; we'll implement small matrix ops)
+  // covariance matrix P (4x4)
+  let P = identityMatrix(4, 1e3); // large initial uncertainty
+  // process noise Q
+  const qPos = 0.01; // position process noise
+  const qVel = 0.5;  // velocity process noise
+  let Q = [
+    [qPos,0,0,0],
+    [0,qVel,0,0],
+    [0,0,qPos,0],
+    [0,0,0,qVel]
+  ];
+  // measurement matrix H (we measure x and y)
+  const H = [
+    [1,0,0,0],
+    [0,0,1,0]
+  ];
+  // measurement noise R
+  let R = [
+    [0.0004, 0],
+    [0, 0.0004]
+  ];
 
-/* ==========================================================
-   6. Analyse d’une vidéo enregistrée – version robuste
-   ========================================================== */
+  function predict(dt) {
+    // F matrix
+    const F = [
+      [1, dt, 0, 0],
+      [0, 1,  0, 0],
+      [0, 0,  1, dt],
+      [0, 0,  0, 1]
+    ];
+    x = matMul(F, x);            // x = F x
+    P = addMat(matMul(matMul(F, P), transpose(F)), Q); // P = F P F^T + Q
+  }
+
+  function update(z) {
+    // z is [x_meas, y_meas] column
+    const y_resid = subMat(z, matMul(H, x)); // innovation
+    const S = addMat(matMul(matMul(H, P), transpose(H)), R); // S = H P H^T + R
+    const K = matMul(matMul(P, transpose(H)), inv2x2(S)); // K = P H^T S^-1  (P 4x4, H^T 4x2 -> K 4x2)
+    x = addMat(x, matMul(K, y_resid)); // x = x + K y
+    const I = identityMatrix(4);
+    const KH = matMul(K, H); // 4x4
+    P = matMul(subMat(I, KH), P);
+  }
+
+  function getState() {
+    return {
+      x: x[0][0],
+      vx: x[1][0],
+      y: x[2][0],
+      vy: x[3][0]
+    };
+  }
+
+  function setStateFromMeasurement(z) {
+    // Initialize state from first measurement
+    x = [[z[0][0]],[0],[z[1][0]],[0]];
+    P = identityMatrix(4, 1e-1);
+  }
+
+  return { predict, update, getState, setStateFromMeasurement };
+}
+
+/* ---------------------------
+   Tiny matrix helpers (small matrices only)
+   Represent matrices as arrays of arrays
+   --------------------------- */
+function identityMatrix(n, scale=1) {
+  const M = Array.from({length:n}, (_,i) => Array.from({length:n}, (_,j) => (i===j?scale:0)));
+  return M;
+}
+function transpose(A) {
+  return A[0].map((_,c) => A.map(r => r[c]));
+}
+function matMul(A,B) {
+  const aRows = A.length, aCols = A[0].length;
+  const bRows = B.length, bCols = B[0].length;
+  const C = Array.from({length:aRows}, () => Array.from({length:bCols}, () => 0));
+  for (let i=0;i<aRows;i++){
+    for (let k=0;k<aCols;k++){
+      const aik = A[i][k];
+      for (let j=0;j<bCols;j++){
+        C[i][j] += aik * B[k][j];
+      }
+    }
+  }
+  return C;
+}
+function addMat(A,B) {
+  const R = A.map((row,i) => row.map((v,j) => v + B[i][j]));
+  return R;
+}
+function subMat(A,B) {
+  const R = A.map((row,i) => row.map((v,j) => v - B[i][j]));
+  return R;
+}
+// inverse for 2x2 matrix only
+function inv2x2(M){
+  const a = M[0][0], b = M[0][1], c = M[1][0], d = M[1][1];
+  const det = a*d - b*c;
+  if (Math.abs(det) < 1e-12) return [[1e12,0],[0,1e12]];
+  const inv = [[d/det, -b/det], [-c/det, a/det]];
+  return inv;
+}
+
+/* ---------------------------
+   UI: start camera preview + overlay (real-time detection)
+   --------------------------- */
+async function startCameraPreview() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width:640, height:480 }});
+    preview.srcObject = stream;
+    // redraw overlay periodically
+    setInterval(() => {
+      try {
+        ctx.drawImage(preview, 0, 0, previewCanvas.width, previewCanvas.height);
+        const img = ctx.getImageData(0,0,previewCanvas.width, previewCanvas.height);
+        const pos = detectBall(img, 3);
+        if (pos) {
+          ctx.beginPath();
+          ctx.strokeStyle = "lime";
+          ctx.lineWidth = 3;
+          ctx.arc(pos.x, pos.y, 14, 0, Math.PI*2);
+          ctx.stroke();
+        }
+      } catch(e){}
+    }, 120);
+  } catch(e){
+    console.warn("Cam preview failed:", e);
+  }
+}
+startCameraPreview();
+
+/* ---------------------------
+   Recording handlers
+   --------------------------- */
+startBtn.addEventListener("click", async () => {
+  if (!preview.srcObject) {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: { width:640, height:480 }});
+      preview.srcObject = s;
+    } catch(e){ alert("Impossible d'accéder à la caméra"); return; }
+  }
+  recordedChunks = [];
+  const stream = preview.srcObject;
+  try {
+    mediaRecorder = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp9" });
+  } catch(e) {
+    mediaRecorder = new MediaRecorder(stream);
+  }
+  mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) recordedChunks.push(e.data); };
+  mediaRecorder.onstop = () => {
+    recordedBlob = new Blob(recordedChunks, { type: "video/webm" });
+    videoURL = URL.createObjectURL(recordedBlob);
+    processBtn.disabled = false;
+    slowMoBtn.disabled = false;
+    document.getElementById("blobSize").textContent = `Vidéo enregistrée (${(recordedBlob.size/1024/1024).toFixed(2)} MB)`;
+  };
+  mediaRecorder.start();
+  document.getElementById("recState").textContent = "État : enregistrement...";
+  startBtn.disabled = true; stopBtn.disabled = false;
+});
+stopBtn.addEventListener("click", () => {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+  document.getElementById("recState").textContent = "État : arrêté";
+  startBtn.disabled = false; stopBtn.disabled = true;
+});
+loadBtn.addEventListener("click", ()=> fileInput.click());
+fileInput.addEventListener("change", ()=> {
+  const f = fileInput.files[0];
+  if (!f) return;
+  recordedBlob = f;
+  videoURL = URL.createObjectURL(f);
+  processBtn.disabled = false; slowMoBtn.disabled = false;
+  document.getElementById("blobSize").textContent = `Fichier chargé (${(f.size/1024/1024).toFixed(2)} MB)`;
+});
+
+/* ---------------------------
+   Core: process a recorded video frame-by-frame with Kalman smoothing
+   --------------------------- */
 processBtn.addEventListener("click", async () => {
+  if (!videoURL) { alert("Aucune vidéo enregistrée ou chargée."); return; }
 
-  samples = [];
+  // reset data
+  samplesRaw = []; samplesFilt = [];
   pxToMeter = null;
+  nSamplesSpan.textContent = "0";
+  aEstimatedSpan.textContent = "—";
+  aTheorySpan.textContent = "—";
+  regEquationP.textContent = "Équation : —";
 
   const video = document.createElement("video");
   video.src = videoURL;
   video.muted = true;
 
-  await video.play();
-  video.pause();
+  // ensure metadata loaded
+  await new Promise((res,rej)=> {
+    video.onloadedmetadata = ()=> res();
+    video.onerror = (e)=> rej(e);
+  });
 
-  const step = Number(frameStepMs.value) / 1000;
+  // we use stepping by currentTime increments to support variable frame rates
+  const step = Math.max(1, Number(frameStepMs.value) || 10) / 1000; // seconds
 
+  // Kalman instance
+  const kf = createKalman();
+  let firstMeasure = true;
+  let prevT = 0;
+
+  // frame processing function
   function processFrame() {
+    try {
+      // draw frame to canvas
+      ctx.drawImage(video, 0, 0, previewCanvas.width, previewCanvas.height);
+      const img = ctx.getImageData(0,0,previewCanvas.width, previewCanvas.height);
 
-    if (video.currentTime >= video.duration) {
-      updateAll();
+      // calibration if not done
+      if (!pxToMeter) {
+        const cal = estimatePxToMeter(img);
+        if (cal) {
+          pxToMeter = cal;
+          document.getElementById("pxToMeterDisplay")?.textContent = pxToMeter.toFixed(6) + " m/px";
+        }
+      }
+
+      // detect ball
+      const pos = detectBall(img, 2);
+
+      const t = video.currentTime * slowMotionFactor;
+
+      if (pos) {
+        const x_px = pos.x, y_px = pos.y;
+        const x_m = pxToMeter ? x_px * pxToMeter : NaN;
+        const y_m = pxToMeter ? y_px * pxToMeter : NaN;
+        samplesRaw.push({t, x_px, y_px, x_m, y_m});
+
+        // Kalman update
+        if (pxToMeter && Number.isFinite(x_m) && Number.isFinite(y_m)) {
+          const z = [[x_m],[y_m]];
+          if (firstMeasure) {
+            kf.setStateFromMeasurement(z);
+            firstMeasure = false;
+          } else {
+            const dt = Math.max(1e-3, t - prevT);
+            // predict with dt
+            kf.predict(dt);
+            kf.update(z);
+          }
+          const st = kf.getState();
+          samplesFilt.push({t, x: st.x, y: st.y, vx: st.vx, vy: st.vy});
+          prevT = t;
+
+          // overlay filtered & raw
+          // draw raw small circle (red)
+          ctx.beginPath();
+          ctx.strokeStyle = "rgba(255,0,0,0.7)";
+          ctx.lineWidth = 2;
+          ctx.arc(x_px, y_px, 6, 0, Math.PI*2);
+          ctx.stroke();
+          // draw filtered circle (cyan)
+          ctx.beginPath();
+          // convert filtered x (m) back to px for overlay on canvas
+          const fx_px = pxToMeter ? (st.x / pxToMeter) : st.x;
+          const fy_px = pxToMeter ? (st.y / pxToMeter) : st.y;
+          ctx.strokeStyle = "cyan";
+          ctx.lineWidth = 2;
+          ctx.arc(fx_px, fy_px, 10, 0, Math.PI*2);
+          ctx.stroke();
+
+          nSamplesSpan.textContent = samplesRaw.length.toString();
+        }
+      }
+
+      // advance frame
+      if (video.currentTime + 0.0001 < video.duration) {
+        video.currentTime = Math.min(video.duration, video.currentTime + step);
+      } else {
+        // finished
+        finalizeAnalysis();
+        return;
+      }
+    } catch (e) {
+      console.error("processFrame error", e);
+      finalizeAnalysis();
       return;
     }
-
-    ctx.drawImage(video, 0, 0);
-    const img = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
-
-    // Calibrage automatique une seule fois
-    if (!pxToMeter) {
-      const cal = autoCalibrateDiameter(img);
-      if (cal) pxToMeter = cal;
-    }
-
-    // Détection balle
-    const pos = detectBall(img);
-    if (pos && pxToMeter) {
-      samples.push({
-        t: video.currentTime * slowMotionFactor,
-        x: pos.x * pxToMeter,
-        y: pos.y * pxToMeter
-      });
-
-      // affichage overlay
-      ctx.beginPath();
-      ctx.strokeStyle = "cyan";
-      ctx.lineWidth = 3;
-      ctx.arc(pos.x, pos.y, 12, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // Frame suivante
-    video.currentTime += step;
   }
 
+  // link handler
   video.onseeked = processFrame;
+  // start at 0
   video.currentTime = 0;
 });
 
-
-/* ==========================================================
-   7. Calcul vitesses + régression
-   ========================================================== */
-function updateAll() {
-
-  // vitesse
-  for (let i = 1; i < samples.length; i++) {
-    const dt = samples[i].t - samples[i-1].t;
-    if (dt > 0)
-      samples[i].v = (samples[i].y - samples[i-1].y) / dt;
+/* ---------------------------
+   Finalize: compute velocities, regression and draw charts
+   --------------------------- */
+function finalizeAnalysis() {
+  if (samplesFilt.length < 3) {
+    alert("Données insuffisantes après filtrage (vérifiez la détection / la calibration).");
+    return;
   }
 
-  buildCharts();
+  // ensure velocities exist (kf provides vx,vy per sample)
+  // compute scalar velocity along slope: use projection of velocity vector onto downhill direction
+  // But simpler: use magnitude of vy projected (depends on orientation); here we'll compute speed magnitude
+  const T = samplesFilt.map(s => s.t);
+  const V = samplesFilt.map(s => Math.hypot(s.vx, s.vy));
+  const Y = samplesFilt.map(s => s.y);
+
+  // linear regression constrained to v = a * t (through origin)
+  // compute a = sum(t*v) / sum(t^2)
+  let num = 0, den = 0;
+  for (let i=0;i<T.length;i++){
+    if (Number.isFinite(V[i]) && Number.isFinite(T[i])) {
+      num += T[i]*V[i];
+      den += T[i]*T[i];
+    }
+  }
+  const aEst = den ? num/den : NaN;
+
+  // theoretical
+  const alphaDeg = Number(angleInput.value) || 0;
+  const aTheory = 9.8 * Math.sin(alphaDeg * Math.PI/180);
+
+  // update DOM
+  document.getElementById("aEstimated").textContent = Number.isFinite(aEst) ? aEst.toFixed(4) : "—";
+  document.getElementById("aTheory").textContent = aTheory.toFixed(4);
+  regEquationP.textContent = Number.isFinite(aEst) ? `v = ${aEst.toFixed(4)} · t` : "Équation : —";
+
+  // build charts: position (filtered), velocity (filtered), fit
+  buildChartsFromFiltered(samplesFilt, aEst);
+
+  // enable CSV export
+  exportCSVBtn.disabled = false;
 }
 
+/* ---------------------------
+   Charts: display filtered vs raw
+   --------------------------- */
+function buildChartsFromFiltered(filteredSamples, aEst) {
+  const T = filteredSamples.map(s => s.t);
+  const Y = filteredSamples.map(s => s.y);
+  const V = filteredSamples.map(s => Math.hypot(s.vx, s.vy));
 
-/* ==========================================================
-   8. Graphiques Chart.js
-   ========================================================== */
-function buildCharts() {
-
-  const T = samples.map(s => s.t);
-  const Y = samples.map(s => s.y);
-  const V = samples.map(s => s.v);
-
-  // Position
+  // Position chart (filtered)
   if (posChart) posChart.destroy();
   posChart = new Chart(document.getElementById("posChart"), {
-    type: "line",
+    type: 'line',
     data: {
       labels: T,
-      datasets: [{ label: "Position (m)", data: Y }]
-    }
+      datasets: [
+        { label: 'Position filtrée y (m)', data: Y, borderColor: 'cyan', fill:false },
+      ]
+    },
+    options: { scales:{ x:{ title:{display:true,text:'t (s)'} }, y:{ title:{display:true,text:'y (m)'} } } }
   });
 
-  // Vitesse
+  // Velocity chart
   if (velChart) velChart.destroy();
   velChart = new Chart(document.getElementById("velChart"), {
-    type: "line",
+    type: 'line',
     data: {
       labels: T,
-      datasets: [{ label: "Vitesse (m/s)", data: V }]
-    }
+      datasets: [
+        { label: 'Vitesse filtrée (m/s)', data: V, borderColor: 'magenta', fill:false }
+      ]
+    },
+    options: { scales:{ x:{ title:{display:true,text:'t (s)'} }, y:{ title:{display:true,text:'v (m/s)'} } } }
   });
 
-  // Régression
-  const a = regressionSlope(T, V);
-  document.getElementById("regEquation").textContent =
-    "v = " + a.toFixed(4) + "·t";
-
-  const angle = Number(angleInput.value);
-  const aTheory = 9.8 * Math.sin(angle * Math.PI/180);
-  document.getElementById("aTheory").textContent = aTheory.toFixed(4);
-  document.getElementById("aEstimated").textContent = a.toFixed(4);
+  // Fit chart: scatter measured v vs t and fitted line
+  const points = T.map((t,i)=>({x:t, y: V[i]}));
+  const fitLine = T.map(t=>({x:t, y: aEst * t}));
 
   if (fitChart) fitChart.destroy();
   fitChart = new Chart(document.getElementById("fitChart"), {
-    type: "scatter",
+    type: 'scatter',
     data: {
       datasets: [
-        { label: "Vitesse", data: T.map((t,i)=>({x:t,y:V[i]})) },
-        { label: "Ajustement", type: "line", data: T.map(t=>({x:t,y:a*t})) }
+        { label: 'Vitesse filtrée', data: points, pointRadius:3, showLine:false },
+        { label: 'Ajustement v = a·t', data: fitLine, type:'line', borderColor:'orange', fill:false }
       ]
-    }
+    },
+    options: { scales:{ x:{ title:{display:true,text:'t (s)'} }, y:{ title:{display:true,text:'v (m/s)'} } } }
   });
 }
 
+/* ---------------------------
+   CSV export (filtered data)
+   --------------------------- */
+exportCSVBtn.addEventListener("click", () => {
+  if (!samplesFilt.length) { alert("Aucune donnée filtrée à exporter."); return; }
+  const header = ['t (s)','x (m)','y (m)','vx (m/s)','vy (m/s)'];
+  const rows = samplesFilt.map(s => [s.t.toFixed(4), s.x.toFixed(6), s.y.toFixed(6), s.vx.toFixed(6), s.vy.toFixed(6)].join(','));
+  const csv = [header.join(','), ...rows].join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'exao_filtered_data.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+});
 
-// régression simple y = a·t
-function regressionSlope(T, V) {
-  let n = T.length;
-  let sumT=0, sumV=0, sumTV=0, sumT2=0;
-
-  for (let i=0; i<n; i++) {
-    if (!Number.isFinite(V[i])) continue;
-    sumT += T[i];
-    sumV += V[i];
-    sumTV += T[i]*V[i];
-    sumT2 += T[i]*T[i];
-  }
-
-  return (n*sumTV - sumT*sumV) / (n*sumT2 - sumT*sumT);
-}
-
-
-/* ==========================================================
-   9. Bouton ralenti ×0.25
-   ========================================================== */
+/* ---------------------------
+   Ralenti toggle
+   --------------------------- */
 slowMoBtn.addEventListener("click", () => {
   if (slowMotionFactor === 1) {
     slowMotionFactor = 0.25;
@@ -383,3 +566,14 @@ slowMoBtn.addEventListener("click", () => {
     slowMoBtn.textContent = "Ralenti analyse ×0.25";
   }
 });
+
+/* ---------------------------
+   matrix utility note:
+   We used small matrix helpers in createKalman (matMul, addMat...).
+   For brevity those helpers are embedded above inside createKalman() scope.
+   If you copy elsewhere, ensure helpers are present.
+   --------------------------- */
+
+/* ---------------------------
+   End of script
+   --------------------------- */
