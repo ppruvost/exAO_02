@@ -1,12 +1,8 @@
-
-/* script.js
-   Version complète:
-   - Enregistre la caméra (MediaRecorder)
-   - Prend le Blob vidéo -> traite frame-by-frame (requestVideoFrameCallback si dispo)
-   - Détection couleur (HSV) pour balle verte & rose
-   - Calibrage px->m via deux clicks
-   - Calcul position, vitesses, régression (contrainte a via v=a*t and free linear fit v=a*t+b)
-   - Trace pos, vel et droite d'ajustement, affiche équation + R^2
+/* script.js - version 1 balle + calibrage auto diamètre 15cm
+   Principales modifications:
+   - Détection d'une seule balle (couleur verte par défaut)
+   - Calibrage automatique : estimation diam_px sur premières images traitées
+   - pxToMeter = ballDiameter_m / diam_px
 */
 
 const preview = document.getElementById('preview');
@@ -21,8 +17,7 @@ const processBtn = document.getElementById('processBtn');
 
 const angleInput = document.getElementById('angleInput');
 const frameStepMsInput = document.getElementById('frameStepMs');
-const scaleMetersInput = document.getElementById('scaleMeters');
-const calibrateBtn = document.getElementById('calibrateBtn');
+const ballDiameterInput = document.getElementById('ballDiameter');
 
 const recStateP = document.getElementById('recState');
 const blobSizeP = document.getElementById('blobSize');
@@ -30,6 +25,7 @@ const blobSizeP = document.getElementById('blobSize');
 const nSamplesSpan = document.getElementById('nSamples');
 const aEstimatedSpan = document.getElementById('aEstimated');
 const aTheorySpan = document.getElementById('aTheory');
+const pxToMeterDisplay = document.getElementById('pxToMeterDisplay');
 const dataTableBody = document.querySelector('#dataTable tbody');
 const exportCSVBtn = document.getElementById('exportCSVBtn');
 
@@ -40,8 +36,8 @@ let mediaRecorder = null;
 let recordedChunks = [];
 let recordedBlob = null;
 
-let pxToMeter = null; // calibration
-let calibrateClicks = null;
+let pxToMeter = null; // calibration value computed automatically
+let diamSamplesPx = []; // store estimated diameters in px for initial frames
 
 let samples = [];
 let posChart = null, velChart = null, fitChart = null;
@@ -95,36 +91,16 @@ fileInput.addEventListener('change', (ev) => {
   processBtn.disabled = false;
 });
 
-// calibration
-calibrateBtn.addEventListener('click', () => {
-  calibrateClicks = [];
-  alert('Cliquez 2 points sur la vidéo pour définir la distance connue (p.ex. 0.5 m)');
-});
-previewCanvas.addEventListener('click', (e) => {
-  if (calibrateClicks === null) return;
-  const rect = previewCanvas.getBoundingClientRect();
-  calibrateClicks.push({x: e.clientX - rect.left, y: e.clientY - rect.top});
-  if (calibrateClicks.length === 2) {
-    const dx = calibrateClicks[0].x - calibrateClicks[1].x;
-    const dy = calibrateClicks[0].y - calibrateClicks[1].y;
-    const distPx = Math.hypot(dx, dy);
-    const meters = parseFloat(scaleMetersInput.value);
-    if (!meters || meters <= 0) { alert('Entrez une distance (m) valide'); calibrateClicks = null; return; }
-    pxToMeter = meters / distPx;
-    alert(`Calibré : ${distPx.toFixed(1)} px = ${meters} m → pxToMeter = ${pxToMeter.toFixed(6)}`);
-    calibrateClicks = null;
-  } else {
-    alert('Point 1 enregistré, cliquez le point 2.');
-  }
-});
-
-// preview draw
+// preview draw (keeps live preview visible)
 setInterval(()=>{ try{ pCtx.drawImage(preview,0,0,previewCanvas.width,previewCanvas.height);}catch(e){} }, 100);
 
 // ---------- processing recorded video ----------
 processBtn.addEventListener('click', async () => {
   if (!recordedBlob) { alert('Aucune vidéo enregistrée ou chargée'); return; }
   samples = [];
+  diamSamplesPx = [];
+  pxToMeter = null;
+  pxToMeterDisplay.textContent = '—';
   clearTable();
   regEquationP.textContent = 'Équation : —';
   aEstimatedSpan.textContent = '—';
@@ -134,7 +110,7 @@ processBtn.addEventListener('click', async () => {
   updateStatsAndCharts();
 });
 
-// process blob frames
+// process blob frames (single-ball detection + auto calibrate)
 async function processBlobFrames(blob){
   return new Promise((resolve, reject) => {
     const videoEl = document.createElement('video');
@@ -152,28 +128,35 @@ async function processBlobFrames(blob){
       const frameStepMs = Number(frameStepMsInput.value) || 10;
       const desiredStep = frameStepMs / 1000;
 
-      function detectTwoColorsFromImageData(imgData){
+      // detection: return {cx, cy, diamPx} or null
+      function detectBallFromImageData(imgData){
         const data = imgData.data;
         const width = imgData.width, height = imgData.height;
-        let greenSumX=0, greenSumY=0, greenCount=0;
-        let pinkSumX=0, pinkSumY=0, pinkCount=0;
-        const stride = 2;
+        let sumX=0, sumY=0, count=0;
+        let minX=width, minY=height, maxX=0, maxY=0;
+        const stride = 2; // speed-up sampling
         for (let y=0; y<height; y+=stride){
           for (let x=0; x<width; x+=stride){
             const i = (y*width + x)*4;
             const r = data[i], g = data[i+1], b = data[i+2];
             const hsv = rgbToHsv(r,g,b);
+            // green detection (adjust thresholds if needed)
             if (hsv.h >= 70 && hsv.h <= 170 && hsv.s > 0.25 && hsv.v > 0.15 && g > r && g > b){
-              greenSumX += x; greenSumY += y; greenCount++;
-            }
-            if ((hsv.h >= 300 || hsv.h <= 25) && hsv.s > 0.2 && hsv.v > 0.15 && r > g && r > b){
-              pinkSumX += x; pinkSumY += y; pinkCount++;
+              sumX += x; sumY += y; count++;
+              if (x < minX) minX = x;
+              if (y < minY) minY = y;
+              if (x > maxX) maxX = x;
+              if (y > maxY) maxY = y;
             }
           }
         }
-        const green = greenCount ? { x: greenSumX/greenCount, y: greenSumY/greenCount } : null;
-        const pink  = pinkCount  ? { x: pinkSumX/pinkCount,  y: pinkSumY/pinkCount }  : null;
-        return {green, pink};
+        if (count === 0) return null;
+        const cx = sumX / count, cy = sumY / count;
+        const bboxW = maxX - minX;
+        const bboxH = maxY - minY;
+        // diameter estimate: average bbox dimension (robust if ball roughly circular)
+        const diam = Math.max((bboxW + bboxH)/2, 1);
+        return {cx, cy, diam};
       }
 
       // use requestVideoFrameCallback if available
@@ -187,14 +170,43 @@ async function processBlobFrames(blob){
             try {
               wCtx.drawImage(videoEl, 0, 0, w, h);
               const imageData = wCtx.getImageData(0,0,w,h);
-              const pos = detectTwoColorsFromImageData(imageData);
+              const pos = detectBallFromImageData(imageData);
               const sample = {
                 t: Math.round(t*100)/100,
-                xV: pos.green ? (pxToMeter ? pos.green.x * pxToMeter : pos.green.x) : NaN,
-                yV: pos.green ? (pxToMeter ? pos.green.y * pxToMeter : pos.green.y) : NaN,
-                xP: pos.pink  ? (pxToMeter ? pos.pink.x  * pxToMeter : pos.pink.x)  : NaN,
-                yP: pos.pink  ? (pxToMeter ? pos.pink.y  * pxToMeter : pos.pink.y)  : NaN
+                x: pos ? (pxToMeter ? pos.cx * pxToMeter : pos.cx) : NaN,
+                y: pos ? (pxToMeter ? pos.cy * pxToMeter : pos.cy) : NaN,
+                diamPx: pos ? pos.diam : NaN
               };
+
+              // if not yet calibrated, collect diameter samples for first 0.5s (or first N frames)
+              if (!pxToMeter && Number.isFinite(sample.diamPx)) {
+                // collect diameters until we have enough or until time > 0.5s
+                diamSamplesPx.push(sample.diamPx);
+                const collected = diamSamplesPx.length;
+                const maxCollect = Math.max(10, Math.floor(0.5 / desiredStep)); // at least 10 frames or 0.5s
+                if (collected >= maxCollect || t >= 0.6) {
+                  // compute robust average (median)
+                  const arr = diamSamplesPx.slice().sort((a,b)=>a-b);
+                  const median = arr[Math.floor(arr.length/2)];
+                  const ballDiam = Number(ballDiameterInput.value) || 0.15;
+                  if (median > 1) {
+                    pxToMeter = ballDiam / median;
+                    pxToMeterDisplay.textContent = pxToMeter.toFixed(6) + ' m/px';
+                    console.log('Auto-calibrated pxToMeter=', pxToMeter, ' median diam px=', median);
+                  }
+                }
+              }
+
+              // if pxToMeter exists, convert to meters for storage
+              if (pxToMeter && Number.isFinite(sample.x)) {
+                sample.x = Number.isFinite(sample.x) ? sample.x : NaN; // already in meters when created above
+                sample.y = Number.isFinite(sample.y) ? sample.y : NaN;
+              } else {
+                // keep pixel coords until calibration done
+                sample.x = Number.isFinite(sample.x) ? sample.x : NaN;
+                sample.y = Number.isFinite(sample.y) ? sample.y : NaN;
+              }
+
               samples.push(sample);
               updateTableRow(sample);
               nSamplesSpan.textContent = samples.length;
@@ -221,14 +233,38 @@ async function processBlobFrames(blob){
           try {
             wCtx.drawImage(videoEl, 0, 0, w, h);
             const imageData = wCtx.getImageData(0,0,w,h);
-            const pos = detectTwoColorsFromImageData(imageData);
+            const pos = detectBallFromImageData(imageData);
             const sample = {
               t: Math.round(t*100)/100,
-              xV: pos.green ? (pxToMeter ? pos.green.x * pxToMeter : pos.green.x) : NaN,
-              yV: pos.green ? (pxToMeter ? pos.green.y * pxToMeter : pos.green.y) : NaN,
-              xP: pos.pink  ? (pxToMeter ? pos.pink.x  * pxToMeter : pos.pink.x)  : NaN,
-              yP: pos.pink  ? (pxToMeter ? pos.pink.y  * pxToMeter : pos.pink.y)  : NaN
+              x: pos ? (pxToMeter ? pos.cx * pxToMeter : pos.cx) : NaN,
+              y: pos ? (pxToMeter ? pos.cy * pxToMeter : pos.cy) : NaN,
+              diamPx: pos ? pos.diam : NaN
             };
+
+            if (!pxToMeter && Number.isFinite(sample.diamPx)) {
+              diamSamplesPx.push(sample.diamPx);
+              const collected = diamSamplesPx.length;
+              const maxCollect = Math.max(10, Math.floor(0.5 / desiredStep));
+              if (collected >= maxCollect || t >= 0.6) {
+                const arr = diamSamplesPx.slice().sort((a,b)=>a-b);
+                const median = arr[Math.floor(arr.length/2)];
+                const ballDiam = Number(ballDiameterInput.value) || 0.15;
+                if (median > 1) {
+                  pxToMeter = ballDiam / median;
+                  pxToMeterDisplay.textContent = pxToMeter.toFixed(6) + ' m/px';
+                  console.log('Auto-calibrated pxToMeter=', pxToMeter, ' median diam px=', median);
+                }
+              }
+            }
+
+            if (pxToMeter && Number.isFinite(sample.x)) {
+              sample.x = Number.isFinite(sample.x) ? sample.x : NaN;
+              sample.y = Number.isFinite(sample.y) ? sample.y : NaN;
+            } else {
+              sample.x = Number.isFinite(sample.x) ? sample.x : NaN;
+              sample.y = Number.isFinite(sample.y) ? sample.y : NaN;
+            }
+
             samples.push(sample);
             updateTableRow(sample);
             nSamplesSpan.textContent = samples.length;
@@ -264,12 +300,12 @@ function rgbToHsv(r,g,b){
 // table functions
 function clearTable(){ dataTableBody.innerHTML = ''; }
 function updateTableRow(sample){
+  const displayX = Number.isFinite(sample.x) ? (pxToMeter ? sample.x.toFixed(4) : sample.x.toFixed(2) + ' px') : '';
+  const displayY = Number.isFinite(sample.y) ? (pxToMeter ? sample.y.toFixed(4) : sample.y.toFixed(2) + ' px') : '';
   const tr = document.createElement('tr');
   tr.innerHTML = `<td>${sample.t.toFixed(2)}</td>
-    <td>${Number.isFinite(sample.xV)?sample.xV.toFixed(4):''}</td>
-    <td>${Number.isFinite(sample.yV)?sample.yV.toFixed(4):''}</td>
-    <td>${Number.isFinite(sample.xP)?sample.xP.toFixed(4):''}</td>
-    <td>${Number.isFinite(sample.yP)?sample.yP.toFixed(4):''}</td>
+    <td>${displayX}</td>
+    <td>${displayY}</td>
     <td></td>`;
   dataTableBody.appendChild(tr);
   while (dataTableBody.children.length > 2000) dataTableBody.removeChild(dataTableBody.firstChild);
@@ -279,7 +315,9 @@ function updateTableRow(sample){
 function updateStatsAndCharts(){
   if (!samples.length) return;
   const t = samples.map(s => s.t);
-  const posM = samples.map(s => Number.isFinite(s.yV) ? s.yV : NaN);
+  // use y position for motion along slope (depending on orientation, user may prefer x)
+  // Here we take vertical pixel/metric coordinate (y increasing downward). Depending on setup you may invert sign.
+  const posM = samples.map(s => Number.isFinite(s.y) ? (pxToMeter ? s.y : s.y) : NaN);
 
   const vel = new Array(samples.length).fill(NaN);
   for (let i=1;i<samples.length;i++){
@@ -310,14 +348,14 @@ function updateStatsAndCharts(){
   aTheorySpan.textContent = aTheory.toFixed(4);
 
   // prepare chart data
-  const posSeries = samples.map((s,i) => ({x:s.t, y: Number.isFinite(s.yV) ? s.yV : null}));
+  const posSeries = samples.map((s,i) => ({x:s.t, y: Number.isFinite(s.y) ? s.y : null}));
   const velSeries = vel.map((v,i) => ({x: samples[i].t, y: Number.isFinite(v) ? v : null}));
 
   // update position chart
   if (!posChart){
     posChart = new Chart(document.getElementById('posChart').getContext('2d'), {
       type: 'line',
-      data: { datasets: [{ label: 'Position (balle verte) [m or px]', data: posSeries, parsing:false, spanGaps:true }]},
+      data: { datasets: [{ label: 'Position (balle) [m or px]', data: posSeries, parsing:false, spanGaps:true }]},
       options: { scales:{ x:{ type:'linear', title:{display:true, text:'t (s)'} }, y:{ title:{display:true,text:'position'} } } }
     });
   } else { posChart.data.datasets[0].data = posSeries; posChart.update('none'); }
@@ -326,7 +364,7 @@ function updateStatsAndCharts(){
   if (!velChart){
     velChart = new Chart(document.getElementById('velChart').getContext('2d'), {
       type: 'line',
-      data: { datasets: [{ label: 'Vitesse (balle verte) [m/s or px/s]', data: velSeries, parsing:false, spanGaps:true }]},
+      data: { datasets: [{ label: 'Vitesse (balle) [m/s or px/s]', data: velSeries, parsing:false, spanGaps:true }]},
       options: { scales:{ x:{ type:'linear', title:{display:true, text:'t (s)'} }, y:{ title:{display:true,text:'vitesse'} } } }
     });
   } else { velChart.data.datasets[0].data = velSeries; velChart.update('none'); }
@@ -347,7 +385,7 @@ function updateStatsAndCharts(){
       type: 'line',
       data: {
         datasets: [
-          { label: 'Données vitesse (balle verte)', data: validPairs, parsing:false, spanGaps:true, showLine:false, pointRadius:3 },
+          { label: 'Données vitesse (balle)', data: validPairs, parsing:false, spanGaps:true, showLine:false, pointRadius:3 },
           { label: 'Ajustement linéaire', data: fitData, parsing:false, spanGaps:true, showLine:true, borderDash:[6,4], pointRadius:0 }
         ]
       },
@@ -365,8 +403,8 @@ function updateStatsAndCharts(){
     const idx = i;
     if (idx < vel.length){
       const v = vel[idx];
-      const vCell = rows[i].cells[5];
-      if (vCell) vCell.textContent = Number.isFinite(v) ? v.toFixed(4) : '';
+      const vCell = rows[i].cells[3];
+      if (vCell) vCell.textContent = Number.isFinite(v) ? (pxToMeter ? v.toFixed(4) : v.toFixed(2) + ' px/s') : '';
     }
   }
 }
@@ -392,23 +430,41 @@ function linearRegression(dataXY){
 // export CSV
 exportCSVBtn.addEventListener('click', () => {
   if (!samples.length) { alert('Aucune donnée'); return; }
-  const header = ['t (s)','xV','yV','xP','yP'];
-  const rows = samples.map(s => [s.t.toFixed(2), Number.isFinite(s.xV)?s.xV:'', Number.isFinite(s.yV)?s.yV:'', Number.isFinite(s.xP)?s.xP:'', Number.isFinite(s.yP)?s.yP:''].join(','));
+  const header = ['t (s)','x','y','v'];
+  // compute velocities for CSV
+  const t = samples.map(s => s.t);
+  const posM = samples.map(s => Number.isFinite(s.y) ? s.y : NaN);
+  const vel = new Array(samples.length).fill('');
+  for (let i=1;i<samples.length;i++){
+    const dt = t[i] - t[i-1];
+    if (dt > 0){
+      const p1 = posM[i], p0 = posM[i-1];
+      if (Number.isFinite(p1) && Number.isFinite(p0)) vel[i] = ((p1 - p0)/dt).toFixed(6);
+    }
+  }
+  const rows = samples.map((s,i) => [
+    s.t.toFixed(2),
+    Number.isFinite(s.x) ? (pxToMeter ? s.x.toFixed(6) : s.x.toFixed(2)) : '',
+    Number.isFinite(s.y) ? (pxToMeter ? s.y.toFixed(6) : s.y.toFixed(2)) : '',
+    vel[i] || ''
+  ].join(','));
   const csv = [header.join(','), ...rows].join('\n');
   const blob = new Blob([csv], {type:'text/csv'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = 'exao_video_data.csv'; document.body.appendChild(a); a.click(); a.remove();
 });
 
-// small helper to draw preview overlay (not used heavily)
+// small helper to draw preview overlay
 function drawPreviewOverlay(pos){
   try {
     pCtx.drawImage(preview, 0, 0, previewCanvas.width, previewCanvas.height);
     if (!pos) return;
     pCtx.save();
     pCtx.lineWidth = 2;
-    if (pos.green) { pCtx.strokeStyle = 'lime'; pCtx.beginPath(); pCtx.arc(pos.green.x, pos.green.y, 8, 0, Math.PI*2); pCtx.stroke(); }
-    if (pos.pink)  { pCtx.strokeStyle = 'magenta'; pCtx.beginPath(); pCtx.arc(pos.pink.x, pos.pink.y, 8, 0, Math.PI*2); pCtx.stroke(); }
+    pCtx.strokeStyle = 'lime';
+    pCtx.beginPath();
+    pCtx.arc(pos.cx, pos.cy, Math.max(4, pos.diam/2), 0, Math.PI*2);
+    pCtx.stroke();
     pCtx.restore();
   } catch(e){}
 }
