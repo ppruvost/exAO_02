@@ -2,74 +2,84 @@
 <html lang="fr">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>exAO — Vidéo - Le mouvement (une seule balle)</title>
+  <meta name="viewport" content="width=device-width,initial=1" />
+  <title>exAO — Mouvement balle</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
+
 <body>
-  <header><h1>exAO - Enregistrement mouvement d'une balle et traitement de données (1 balle)</h1></header>
+<header>
+  <h1>exAO — Enregistrement & analyse du mouvement d’une balle</h1>
+</header>
 
-  <main>
-    <section id="recorder">
-      <div class="camRow">
-        <video id="preview" autoplay playsinline muted width="640" height="480"></video>
-        <canvas id="previewCanvas" width="640" height="480"></canvas>
-      </div>
+<main>
+<section id="recorder">
 
-      <div class="controls">
-        <button id="startRecBtn">Démarrer enregistrement</button>
-        <button id="stopRecBtn" disabled>Arrêter</button>
-        <button id="loadFileBtn">Charger fichier vidéo</button>
-        <input id="fileInput" type="file" accept="video/*" style="display:none"/>
-      </div>
+  <div class="camRow">
+    <video id="preview" autoplay playsinline muted width="640" height="480"></video>
+    <canvas id="previewCanvas" width="640" height="480"></canvas>
+  </div>
 
-      <div class="meta">
-        <label>Angle α (deg): <input id="angleInput" type="number" value="10" step="0.1" /></label>
-        <label>Diamètre balle (m): <input id="ballDiameter" type="number" value="0.15" step="0.01" /></label>
-        <div>Pas de traitement (ms): <input id="frameStepMs" type="number" value="10" step="1"/> ms</div>
-        <div><small>Calibrage automatique : le script estime le diamètre en pixels sur les premières images et calcule px→m.</small></div>
-      </div>
+  <div class="controls">
+      <button id="startRecBtn">Démarrer enregistrement</button>
+      <button id="stopRecBtn" disabled>Arrêter</button>
 
-      <div class="recordInfo">
-        <p id="recState">État : inactif</p>
-        <p id="blobSize"></p>
-        <button id="processBtn" disabled>Traiter la vidéo enregistrée</button>
-      </div>
-    </section>
+      <button id="loadFileBtn">Charger vidéo</button>
+      <input id="fileInput" type="file" accept="video/*" style="display:none"/>
+  </div>
 
-    <section id="results">
-      <h2>Données & Graphiques</h2>
-      <div id="info">
-        <p>Échantillons: <span id="nSamples">0</span></p>
-        <p>Estimation a (contrainte a, m/s²): <span id="aEstimated">—</span></p>
-        <p>Théorique a = 9.8·sin(α): <span id="aTheory">—</span></p>
-        <p>Calibration px→m : <span id="pxToMeterDisplay">—</span></p>
-      </div>
+  <div class="meta">
+      <label>Angle α (°) :
+        <input id="angleInput" type="number" value="10" step="0.1"/>
+      </label>
 
-      <canvas id="posChart"></canvas>
-      <canvas id="velChart"></canvas>
+      <label>Diamètre balle (m) :
+        <input id="ballDiameter" type="number" value="0.15" step="0.001"/>
+      </label>
 
-      <h3>Droite d'ajustement (v = a·t + b)</h3>
-      <p id="regEquation">Équation : —</p>
-      <canvas id="fitChart"></canvas>
+      <button id="calibrateBallBtn">Étalonner automatiquement</button>
 
-      <h3>Tableau (extrait)</h3>
-      <table id="dataTable">
-        <thead><tr><th>t (s)</th><th>x</th><th>y</th><th>v (m/s)</th></tr></thead>
-        <tbody></tbody>
-      </table>
+      <label>Pas d’analyse (ms) :
+        <input id="frameStepMs" type="number" value="10"/>
+      </label>
+  </div>
 
-      <div class="export">
-        <button id="exportCSVBtn">Exporter CSV</button>
-      </div>
-    </section>
-  </main>
+  <p id="recState">État : inactif</p>
+  <button id="processBtn" disabled>Traiter</button>
 
-  <footer>
-    <small>Basé sur l'exemple fourni — modifié pour 1 balle et calibrage auto (diamètre par défaut 0.15 m).</small>
-  </footer>
+</section>
 
-  <script src="script.js"></script>
+<section id="results">
+  <h2>Résultats</h2>
+
+  <div id="info">
+    <p>Échantillons: <span id="nSamples">0</span></p>
+    <p>Accélération estimée a (m/s²): <span id="aEstimated">—</span></p>
+    <p>Théorique a = 9.8·sin(α): <span id="aTheory">—</span></p>
+  </div>
+
+  <canvas id="posChart"></canvas>
+  <canvas id="velChart"></canvas>
+
+  <h3>Régression v = a·t</h3>
+  <p id="regEquation">—</p>
+  <canvas id="fitChart"></canvas>
+
+  <h3>Données</h3>
+  <table id="dataTable">
+    <thead>
+      <tr><th>t (s)</th><th>x (m)</th><th>y (m)</th><th>v (m/s)</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <button id="exportCSVBtn">Exporter CSV</button>
+</section>
+</main>
+
+<footer><small>exAO — version balle unique</small></footer>
+
+<script src="script.js"></script>
 </body>
 </html>
