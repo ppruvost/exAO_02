@@ -215,53 +215,54 @@ function autoCalibrateDiameter(imgData) {
 
 
 /************************************************************
- * 6. Traitement vidéo
+ * 6. Traitement vidéo – VERSION CORRIGÉE
  ************************************************************/
 processBtn.addEventListener("click", async () => {
   samples = [];
 
   const video = document.createElement("video");
   video.src = videoURL;
+  video.muted = true;
+
   await video.play();
+  video.pause();
 
   const step = Number(frameStepMs.value) / 1000;
 
-  return new Promise(resolve => {
-    video.onseeked = () => {
-      previewCtxDraw();
-    };
-
-    function previewCtxDraw() {
-      ctx.drawImage(video, 0, 0);
-      const img = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
-
-      // calibrage automatique UNE SEULE FOIS
-      if (!pxToMeter) {
-        pxToMeter = autoCalibrateDiameter(img);
-      }
-
-      const pos = detectBall(img);
-      if (pos && pxToMeter) {
-        const t = video.currentTime;
-        samples.push({
-          t: t * slowMotionFactor,
-          x: pos.x * pxToMeter,
-          y: pos.y * pxToMeter
-        });
-      }
-
-      if (video.currentTime < video.duration) {
-        video.currentTime += step;
-      } else {
-        updateAll();
-        resolve();
-      }
+  function processFrame() {
+    if (video.currentTime >= video.duration) {
+      updateAll();
+      return;
     }
 
-    video.currentTime = 0;
-  });
-});
+    ctx.drawImage(video, 0, 0);
+    const img = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
 
+    // --- calibrage auto uniquement sur la première frame détectée ---
+    if (!pxToMeter) {
+      const cal = autoCalibrateDiameter(img);
+      if (cal) pxToMeter = cal;
+    }
+
+    // --- détection balle ---
+    const pos = detectBall(img);
+    if (pos && pxToMeter) {
+      samples.push({
+        t: video.currentTime * slowMotionFactor,
+        x: pos.x * pxToMeter,
+        y: pos.y * pxToMeter
+      });
+    }
+
+    // --- frame suivante ---
+    video.currentTime += step;
+    video.onseeked = processFrame;
+  }
+
+  // lancement
+  video.currentTime = 0;
+  video.onseeked = processFrame;
+});
 
 /************************************************************
  * 7. Calcul vitesses + régression
