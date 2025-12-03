@@ -1,5 +1,5 @@
 /************************************************************
- * script.js - exAO_02
+ * script.js - exAO_02 (corrigé)
  ************************************************************/
 
 /* -------------------------
@@ -14,6 +14,7 @@ const MIN_PIXELS_FOR_DETECT = 40;
 let recordedChunks = [];
 let recordedBlob = null;
 let videoURL = null;
+let t0_detect = null; // moment où la balle est détectée pour la 1ère fois (temps relatif)
 
 let pxToMeter = null;
 let samplesRaw = [];   // {t, x_px, y_px, x_m, y_m}
@@ -53,6 +54,7 @@ const exportCSVBtn = document.getElementById("exportCSVBtn");
 
 /* Charts */
 let posChart = null, velChart = null, fitChart = null;
+let doc2Chart = null, doc3Chart = null; // MRU / MRUV charts
 
 /* -------------------------
    Utilities: RGB -> HSV
@@ -276,6 +278,7 @@ processBtn.addEventListener("click", async ()=>{
 
   // reset
   samplesRaw = []; samplesFilt = []; pxToMeter = null;
+  t0_detect = null; // important: reset time-zero for new processing
   nSamplesSpan.textContent = "0";
   aEstimatedSpan.textContent = "—";
   aTheorySpan.textContent = "—";
@@ -293,7 +296,7 @@ processBtn.addEventListener("click", async ()=>{
   // Kalman
   const kf = createKalman();
   let initialized = false;
-  let prevT = 0;
+  let prevT = null; // previous *relative* time for dt
 
   // processing function
   function processFrame(){
@@ -302,41 +305,51 @@ processBtn.addEventListener("click", async ()=>{
       ctx.drawImage(vid, 0, 0, previewCanvas.width, previewCanvas.height);
       const img = ctx.getImageData(0,0,previewCanvas.width, previewCanvas.height);
 
-      // calibration
+      // calibration (try to calibrate early)
       if (!pxToMeter){
         const cal = estimatePxToMeter(img);
         if (cal) {
           pxToMeter = cal;
-          // optional display
           const pxDisp = document.getElementById("pxToMeterDisplay");
           if (pxDisp) pxDisp.textContent = pxToMeter.toFixed(6) + " m/px";
         }
       }
 
       const pos = detectBall(img, 2);
-      const t = vid.currentTime * slowMotionFactor;
+      const absT = vid.currentTime * slowMotionFactor; // absolute video time adjusted by slowMotionFactor
+
+      // compute relative time only when ball is visible
+      if (pos) {
+        if (t0_detect === null) t0_detect = absT;   // première apparition de la balle
+        var relT = absT - t0_detect;                // temps relatif (t=0 à l'entrée)
+      } else {
+        var relT = null;
+      }
 
       if (pos){
         const x_px = pos.x, y_px = pos.y;
         const x_m = pxToMeter ? x_px * pxToMeter : NaN;
         const y_m = pxToMeter ? y_px * pxToMeter : NaN;
-        samplesRaw.push({t, x_px, y_px, x_m, y_m});
 
-        // Kalman update if calibrated
+        // push raw sample with relative time
+        samplesRaw.push({t: relT, x_px, y_px, x_m, y_m});
+
+        // Kalman update if calibrated and measurement finite
         if (pxToMeter && Number.isFinite(x_m) && Number.isFinite(y_m)){
           const z = [[x_m],[y_m]];
           if (!initialized){
             kf.setFromMeasurement(z);
             initialized = true;
-            prevT = t;
+            prevT = relT;
           } else {
-            const dt = Math.max(1e-3, t - prevT);
+            // dt computed from relative times
+            const dt = Math.max(1e-6, relT - prevT);
             kf.predict(dt);
             kf.update(z);
-            prevT = t;
+            prevT = relT;
           }
           const st = kf.getState();
-          samplesFilt.push({t, x: st.x, y: st.y, vx: st.vx, vy: st.vy});
+          samplesFilt.push({t: relT, x: st.x, y: st.y, vx: st.vx, vy: st.vy});
 
           // overlay draw raw + filtered
           // raw (red)
@@ -402,9 +415,17 @@ function finalize(){
   aTheorySpan.textContent = aTheory.toFixed(4);
   regEquationP.textContent = Number.isFinite(aEst) ? `v = ${aEst.toFixed(4)} · t` : "Équation : —";
 
-  // charts
+  // charts d'origine
   buildCharts(samplesFilt, aEst);
-  buildPythonLikeVisuals();
+
+  // selon alpha : MRU si alpha=0, MRUV sinon (version B : graphiques physiques)
+  if (alphaDeg === 0) {
+    // MRU : use (t, x)
+    buildDoc2_MRU(samplesFilt);
+  } else {
+    // MRUV : use (t, y)
+    buildDoc3_MRUV(samplesFilt);
+  }
 
   exportCSVBtn.disabled = false;
 }
@@ -451,6 +472,105 @@ function buildCharts(filteredSamples, aEst){
 }
 
 /* -------------------------
+   Document MRU : (t, x)
+   ------------------------- */
+function buildDoc2_MRU(samples){
+    const canvas = document.getElementById("doc2Chart");
+    if (!canvas) {
+        console.warn("Canvas #doc2Chart non trouvé dans le DOM.");
+        return;
+    }
+    if (doc2Chart) doc2Chart.destroy();
+
+    const T = samples.map(s => s.t);
+    const X = samples.map(s => s.x);
+
+    doc2Chart = new Chart(canvas, {
+        type: "line",
+        data: {
+            labels: T,
+            datasets: [
+                { label: "Position x (m)", data: X, borderColor: "red", fill:false, pointRadius:3 }
+            ]
+        },
+        options: {
+            responsive: true,
+            plugins:{ legend:{ display:true } },
+            scales: {
+                x: { title: { display: true, text: "t (s)" } },
+                y: { title: { display: true, text: "x (m)" } }
+            }
+        }
+    });
+}
+
+/* -------------------------
+   Document MRUV : (t, y)
+   ------------------------- */
+function buildDoc3_MRUV(samples){
+    const canvas = document.getElementById("doc3Chart");
+    if (!canvas) {
+        console.warn("Canvas #doc3Chart non trouvé dans le DOM.");
+        return;
+    }
+    if (doc3Chart) doc3Chart.destroy();
+
+    const T = samples.map(s => s.t);
+    const Y = samples.map(s => s.y);
+
+    // régression quadratique A t^2 + B t + C  (normal equations)
+    const n = T.length;
+    let S0 = n, S1 = 0, S2 = 0, S3 = 0, S4 = 0;
+    let SX = 0, STX = 0, ST2X = 0;
+    for (let i=0;i<n;i++){
+        const t = T[i], x = Y[i], t2 = t*t;
+        S1 += t; S2 += t2; S3 += t2*t; S4 += t2*t2;
+        SX += x; STX += t*x; ST2X += t2*x;
+    }
+    const M = [
+        [S4,S3,S2],
+        [S3,S2,S1],
+        [S2,S1,S0]
+    ];
+    const V = [ST2X, STX, SX];
+
+    function solve3(M,V){
+        const [a,b,c] = M[0];
+        const [d,e,f] = M[1];
+        const [g,h,i] = M[2];
+        const det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g);
+        if (Math.abs(det) < 1e-12) return [0,0,0];
+        const Dx = (V[0]*(e*i - f*h) - b*(V[1]*i - f*V[2]) + c*(V[1]*h - e*V[2]));
+        const Dy = (a*(V[1]*i - f*V[2]) - V[0]*(d*i - f*g) + c*(d*V[2] - V[1]*g));
+        const Dz = (a*(e*V[2] - V[1]*h) - b*(d*V[2] - V[1]*g) + V[0]*(d*h - e*g));
+        return [Dx/det, Dy/det, Dz/det];
+    }
+
+    const [A,B,C] = solve3(M,V);
+    const a = 2*A;
+    const fit = T.map(t => A*t*t + B*t + C);
+
+    doc3Chart = new Chart(canvas, {
+        type: "line",
+        data: {
+            labels: T,
+            datasets: [
+                { label: "Position y (m)", data: Y, borderColor: "blue", fill:false, pointRadius:3 },
+                { label: `Fit: a=${a.toFixed(3)} m/s²`, data: fit, borderColor: "darkblue", fill:false, pointRadius:0, borderDash:[6,4] }
+            ]
+        },
+        options: {
+            responsive: true,
+            plugins:{ legend:{ display:true } },
+            scales: {
+                x: { title: { display: true, text: "t (s)" } },
+                y: { title: { display: true, text: "y (m)" } }
+            }
+        }
+    });
+}
+
+/* -------------------------
    Export CSV (filtered)
    ------------------------- */
 exportCSVBtn.addEventListener("click", ()=>{
@@ -477,168 +597,6 @@ slowMoBtn.addEventListener("click", ()=>{
     slowMoBtn.textContent = "Ralenti ×0.25";
   }
 });
-/* =========================================================
-   Graphiques type Python (TP_2REMI_mvt23.py)
-   Document 1 – MRU + MRUV (vue de dessus)
-   Document 2 – MRU (régression linéaire)
-   Document 3 – MRUV (régression quadratique)
-   ========================================================= */
-
-let doc1Chart = null, doc2Chart = null, doc3Chart = null;
-
-/* ------------------------------
-   Document 1 : MRU + MRUV
-   ------------------------------ */
-function buildDoc1_MRU_MRUV(samples){
-    const canvas = document.getElementById("doc1Chart");
-    if (doc1Chart) doc1Chart.destroy();
-
-    const X_MRU  = samples.map(s => s.x);   // selon ton modèle → x = MRU
-    const X_MRUV = samples.map(s => s.y);   // y = MRUV
-
-    doc1Chart = new Chart(canvas, {
-        type: "scatter",
-        data: {
-            datasets: [
-                {
-                    label: "MRU (m)",
-                    data: X_MRU.map(v => ({x:v, y:0.52})),
-                    pointRadius: 6,
-                    backgroundColor: "red"
-                },
-                {
-                    label: "MRUV (m)",
-                    data: X_MRUV.map(v => ({x:v, y:0.38})),
-                    pointRadius: 6,
-                    backgroundColor: "blue"
-                }
-            ]
-        },
-        options:{
-            responsive:true,
-            plugins:{ legend:{ position:"top" } },
-            scales:{
-                x:{ title:{display:true, text:"Distance (m)"} },
-                y:{ display:false }
-            }
-        }
-    });
-}
-
-/* ------------------------------
-   Document 2 : MRU régression linéaire
-   ------------------------------ */
-function buildDoc2_MRU(samples){
-    const canvas = document.getElementById("doc2Chart");
-    if (doc2Chart) doc2Chart.destroy();
-
-    const T = samples.map(s => s.t);
-    const X = samples.map(s => s.x);
-
-    // régression linéaire
-    let n=T.length, sumT=0,sumX=0,sumTT=0,sumTX=0;
-    for(let i=0;i<n;i++){
-        sumT += T[i];
-        sumX += X[i];
-        sumTT += T[i]*T[i];
-        sumTX += T[i]*X[i];
-    }
-
-    const slope = (n*sumTX - sumT*sumX) / (n*sumTT - sumT*sumT);
-    const intercept = (sumX - slope*sumT)/n;
-
-    const fit = T.map(t => slope*t + intercept);
-
-    doc2Chart = new Chart(canvas, {
-        type:"line",
-        data:{
-            labels:T,
-            datasets:[
-                { label:"Données MRU", data:X, pointRadius:4, borderColor:"red", fill:false },
-                { label:`v = ${slope.toFixed(2)} m/s`, data:fit, borderColor:"darkred", fill:false }
-            ]
-        },
-        options:{
-            scales:{
-                x:{ title:{display:true,text:"Temps (s)"} },
-                y:{ title:{display:true,text:"Position (m)"} }
-            }
-        }
-    });
-}
-
-/* ------------------------------
-   Document 3 : MRUV régression poly2
-   ------------------------------ */
-function buildDoc3_MRUV(samples){
-    const canvas = document.getElementById("doc3Chart");
-    if (doc3Chart) doc3Chart.destroy();
-
-    const T = samples.map(s => s.t);
-    const X = samples.map(s => s.y);
-
-    // système de régression quadratique : A t² + B t + C
-    let n=T.length;
-    let S0=n, S1=0, S2=0, S3=0, S4=0, SX=0, STX=0, ST2X=0;
-
-    for(let i=0;i<n;i++){
-        const t=T[i], x=X[i], t2=t*t;
-        S1+=t; S2+=t2; S3+=t2*t; S4+=t2*t2;
-        SX+=x; STX+=t*x; ST2X+=t2*x;
-    }
-
-    function solve3(M,V){
-        const [a,b,c] = M[0];
-        const [d,e,f] = M[1];
-        const [g,h,i] = M[2];
-        const det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g);
-        if (Math.abs(det)<1e-12) return [0,0,0];
-
-        return [
-            (V[0]*(e*i - f*h) - b*(V[1]*i - f*V[2]) + c*(V[1]*h - e*V[2]))/det,
-            (a*(V[1]*i - f*V[2]) - V[0]*(d*i - f*g) + c*(d*V[2] - V[1]*g))/det,
-            (a*(e*V[2] - V[1]*h) - b*(d*V[2] - V[1]*g) + V[0]*(d*h - e*g))/det
-        ];
-    }
-
-    const M = [
-        [S4,S3,S2],
-        [S3,S2,S1],
-        [S2,S1,S0]
-    ];
-    const V = [ST2X, STX, SX];
-    const [A,B,C] = solve3(M,V);
-
-    const a = 2*A;
-    const fit = T.map(t => A*t*t + B*t + C);
-
-    doc3Chart = new Chart(canvas, {
-        type:"line",
-        data:{
-            labels:T,
-            datasets:[
-                { label:"Données MRUV", data:X, pointRadius:4, borderColor:"blue", fill:false },
-                { label:`a = ${a.toFixed(2)} m/s²`, data:fit, borderColor:"darkblue", fill:false }
-            ]
-        },
-        options:{
-            scales:{
-                x:{ title:{display:true,text:"Temps (s)"} },
-                y:{ title:{display:true,text:"Position (m)"} }
-            }
-        }
-    });
-}
-
-/* ------------------------------
-   Appel automatique dans finalize()
-   ------------------------------ */
-function buildPythonLikeVisuals(){
-    buildDoc1_MRU_MRUV(samplesFilt);
-    buildDoc2_MRU(samplesFilt);
-    buildDoc3_MRUV(samplesFilt);
-}
-
 /* -------------------------
    End of script
    ------------------------- */
