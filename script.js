@@ -1,10 +1,5 @@
 /************************************************************
- * script.js - exAO_02 pack complet
- * - Détection couleur ~ RGB(230,190,40) (HSV)
- * - Calibrage auto (diamètre = 0.15 m)
- * - Filtre de Kalman 2D (x,y + vx,vy)
- * - Overlay temps réel, traitement vidéo frame-by-frame
- * - Ralenti ×0.25, export CSV, Chart.js
+ * script.js - exAO_02
  ************************************************************/
 
 /* -------------------------
@@ -409,6 +404,7 @@ function finalize(){
 
   // charts
   buildCharts(samplesFilt, aEst);
+  buildPythonLikeVisuals();
 
   exportCSVBtn.disabled = false;
 }
