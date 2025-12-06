@@ -204,7 +204,52 @@ function inv2x2(M){
   if (Math.abs(det) < 1e-12) return [[1e12,0],[0,1e12]];
   return [[d/det, -b/det], [-c/det, a/det]];
 }
-
+/* -------------------------
+   AUTO ANGLE: compute principal direction (PCA) from filtered samples (x,y in meters)
+   Returns angle in degrees (signed), positive when principal vector has positive y component.
+   We'll use absolute angle for computing g·sin(theta).
+   ------------------------- */
+function computePrincipalAngleDeg(samples){
+  // Need at least 2 samples
+  if (!samples || samples.length < 2) return NaN;
+  // compute mean
+  let mx = 0, my = 0;
+  for (const s of samples){ mx += s.x; my += s.y; }
+  mx /= samples.length; my /= samples.length;
+  // covariance matrix elements
+  let Sxx = 0, Sxy = 0, Syy = 0;
+  for (const s of samples){
+    const dx = s.x - mx, dy = s.y - my;
+    Sxx += dx*dx;
+    Sxy += dx*dy;
+    Syy += dy*dy;
+  }
+  // normalize by N (not necessary but stable)
+  Sxx /= samples.length;
+  Sxy /= samples.length;
+  Syy /= samples.length;
+  // largest eigenvector of [[Sxx, Sxy],[Sxy,Syy]]
+  // compute angle = atan2(vy, vx) where v is eigenvector
+  // eigenvector corresponds to angle = 0.5 * atan2(2*Sxy, Sxx - Syy)
+  const theta = 0.5 * Math.atan2(2*Sxy, Sxx - Syy);
+  let angleDeg = theta * 180 / Math.PI;
+  // ensure sign consistent: we want angle of the direction of motion (from first to last)
+  // compute displacement vector from earliest to latest sample
+  const first = samples[0], last = samples[samples.length-1];
+  const dx = last.x - first.x, dy = last.y - first.y;
+  if (dx === 0 && dy === 0) return Math.abs(angleDeg);
+  const dirAngle = Math.atan2(dy, dx) * 180 / Math.PI;
+  // choose sign of principal angle to match direction
+  // if angles differ by more than 90°, flip sign
+  let delta = dirAngle - angleDeg;
+  while (delta > 180) delta -= 360;
+  while (delta < -180) delta += 360;
+  if (Math.abs(delta) > 90) angleDeg += 180; // flip
+  // normalize to [-180,180)
+  while (angleDeg >= 180) angleDeg -= 360;
+  while (angleDeg < -180) angleDeg += 360;
+  return angleDeg;
+}
 /* -------------------------
    Camera preview + overlay (real-time)
    ------------------------- */
