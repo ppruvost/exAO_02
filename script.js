@@ -1,5 +1,5 @@
 /************************************************************
- * script.js - exAO_02
+ * script.js - exAO_02 (version intégrée : MRUA/MRUV/X(t)/CSV)
  ************************************************************/
 
 /* -------------------------
@@ -245,11 +245,19 @@ startBtn.addEventListener("click", async ()=>{
   try { mediaRecorder = new MediaRecorder(preview.srcObject, { mimeType: "video/webm;codecs=vp9" }); }
   catch(e){ mediaRecorder = new MediaRecorder(preview.srcObject); }
   mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) recordedChunks.push(e.data); };
-  mediaRecorder.onstop = ()=>{
+
+  // AUTOMATIQUE : stop -> lancement du traitement
+  mediaRecorder.onstop = async ()=>{
     recordedBlob = new Blob(recordedChunks, { type:"video/webm" });
     videoURL = URL.createObjectURL(recordedBlob);
     processBtn.disabled = false; slowMoBtn.disabled = false;
     blobSizeP && (blobSizeP.textContent = `Vidéo enregistrée (${(recordedBlob.size/1024/1024).toFixed(2)} MB)`);
+    // lance automatiquement le traitement
+    try {
+      processBtn.click();
+    } catch(e) {
+      console.error("Erreur lancement auto process:", e);
+    }
   };
   mediaRecorder.start();
   recStateP.textContent = "État : enregistrement...";
@@ -261,13 +269,15 @@ stopBtn.addEventListener("click", ()=>{
   startBtn.disabled = false; stopBtn.disabled = true;
 });
 loadBtn.addEventListener("click", ()=> fileInput.click());
-fileInput.addEventListener("change", ()=>{
+fileInput.addEventListener("change", ()=>{ 
   const f = fileInput.files[0];
   if (!f) return;
   recordedBlob = f;
   videoURL = URL.createObjectURL(f);
   processBtn.disabled = false; slowMoBtn.disabled = false;
   blobSizeP && (blobSizeP.textContent = `Fichier chargé (${(f.size/1024/1024).toFixed(2)} MB)`);
+  // lancer automatiquement le traitement pour un fichier chargé
+  try { processBtn.click(); } catch(e){ console.error("auto process load err", e); }
 });
 
 /* -------------------------
@@ -397,8 +407,9 @@ function finalize(){
   const T = samplesFilt.map(s=>s.t);
   const V = samplesFilt.map(s=>Math.hypot(s.vx, s.vy));
   const Y = samplesFilt.map(s=>s.y);
+  const X = samplesFilt.map(s=>s.x);
 
-  // constrained regression v = a * t (through origin)
+  // constrained regression v = a * t (through origin) using scalar speed
   let num=0, den=0;
   for (let i=0;i<T.length;i++){
     if (Number.isFinite(V[i]) && Number.isFinite(T[i])){
@@ -408,42 +419,80 @@ function finalize(){
   }
   const aEst = den ? num/den : NaN;
 
-  const alphaDeg = Number(angleInput.value) || 0;
+  // read angle from input (deg) and compute theoretical a = g * sin(theta)
+  const alphaDeg = Number(angleInput ? angleInput.value : 0) || 0;
   const aTheory = 9.8 * Math.sin(alphaDeg * Math.PI/180);
 
+  // store outputs
   aEstimatedSpan.textContent = Number.isFinite(aEst) ? aEst.toFixed(4) : "—";
   aTheorySpan.textContent = aTheory.toFixed(4);
   regEquationP.textContent = Number.isFinite(aEst) ? `v = ${aEst.toFixed(4)} · t` : "Équation : —";
 
-  // charts d'origine
+  // charts d'origine (ajout X(t) plotting)
   buildCharts(samplesFilt, aEst);
 
-  // selon alpha : MRU si alpha=0, MRUV sinon (version B : graphiques physiques)
+  // Model MRUA along the slope: we'll use the y coordinate as "along the slope" (consistent with prior code)
+  // initial conditions from first filtered sample
+  const y0 = samplesFilt[0].y;
+  const v0_y = samplesFilt[0].vy; // initial velocity along y (m/s)
+  const g = 9.81;
+  // theoretical acceleration from angle input
+  const a_theo = aTheory;
+
+  // compute theoretical position array for comparison
+  const y_theo = T.map(t => y0 + v0_y * t + 0.5 * a_theo * t * t);
+
+  // Add theoretical curve to MRUV chart (doc3Chart) if present, else create/update
+  // buildDoc3_MRUV currently fits a quadratic; we'll reuse it but also plot theory overlay
+  // call buildDoc3_MRUV which will compute its own fit; then overlay theory if doc3Chart exists
   if (alphaDeg === 0) {
-    // MRU : use (t, x)
     buildDoc2_MRU(samplesFilt);
   } else {
-    // MRUV : use (t, y)
     buildDoc3_MRUV(samplesFilt);
+    // overlay theory on doc3Chart if exists
+    if (doc3Chart) {
+      // add / update second dataset with y_theo
+      const labels = T;
+      // push a dataset for theory (dashed)
+      const ds = { label: `Théorie a=g·sinθ (${a_theo.toFixed(4)} m/s²)`, data: y_theo, borderColor: 'green', borderDash:[6,4], fill:false, pointRadius:0 };
+      // If already present (by label), replace
+      let found = false;
+      doc3Chart.data.datasets.forEach((d,i)=>{
+        if (d.label && d.label.startsWith("Théorie a=g·sinθ")) { doc3Chart.data.datasets[i] = ds; found = true; }
+      });
+      if (!found) doc3Chart.data.datasets.push(ds);
+      doc3Chart.update();
+    }
   }
 
   exportCSVBtn.disabled = false;
+
+  // AUTOMATIQUE : export CSV à la fin du traitement
+  try { exportCSVAuto(); } catch(e){ console.error("export CSV auto failed", e); }
 }
 
 /* -------------------------
    Build charts (filtered data)
+   - Now includes X(t) plotting on posChart
    ------------------------- */
 function buildCharts(filteredSamples, aEst){
   const T = filteredSamples.map(s=>s.t);
   const Y = filteredSamples.map(s=>s.y);
+  const X = filteredSamples.map(s=>s.x);
   const V = filteredSamples.map(s=>Math.hypot(s.vx, s.vy));
 
-  // position chart
+  // position chart (both X and Y)
   if (posChart) posChart.destroy();
   posChart = new Chart(document.getElementById("posChart"), {
     type: 'line',
-    data: { labels: T, datasets: [{ label: 'Position filtrée y (m)', data: Y, borderColor:'cyan', fill:false }] },
-    options: { scales:{ x:{ title:{display:true,text:'t (s)'} }, y:{ title:{display:true,text:'y (m)'} } } }
+    data: {
+      labels: T,
+      datasets: [
+        { label: 'Position filtrée y (m)', data: Y, borderColor:'cyan', fill:false },
+        { label: 'Position filtrée x (m)', data: X, borderColor:'red', fill:false }
+      ]
+    },
+    options: { scales:{ x:{ title:{display:true,text:'t (s)'} }, y:{ title:{display:true,text:'position (m)'} } } }
   });
 
   // velocity chart
@@ -454,7 +503,7 @@ function buildCharts(filteredSamples, aEst){
     options: { scales:{ x:{ title:{display:true,text:'t (s)'} }, y:{ title:{display:true,text:'v (m/s)'} } } }
   });
 
-  // fit chart
+  // fit chart (v = a*t)
   const points = T.map((t,i)=>({x:t, y: V[i]}));
   const fitLine = T.map(t => ({x:t, y: aEst * t}));
 
@@ -571,18 +620,32 @@ function buildDoc3_MRUV(samples){
 }
 
 /* -------------------------
-   Export CSV (filtered)
+   Export CSV (filtered)  + auto export
    ------------------------- */
-exportCSVBtn.addEventListener("click", ()=>{
-  if (!samplesFilt.length) { alert("Aucune donnée filtrée."); return; }
-  const header = ['t(s)','x(m)','y(m)','vx(m/s)','vy(m/s)'];
-  const rows = samplesFilt.map(s => [s.t.toFixed(4), s.x.toFixed(6), s.y.toFixed(6), s.vx.toFixed(6), s.vy.toFixed(6)].join(','));
+function exportCSVAuto(){
+  if (!samplesFilt.length) { console.warn("Aucune donnée filtrée : CSV non généré."); return; }
+  // Build theoretical y(t) if angle provided
+  const alphaDeg = Number(angleInput ? angleInput.value : 0) || 0;
+  const aTheory = 9.8 * Math.sin(alphaDeg * Math.PI/180);
+  const y0 = samplesFilt[0].y;
+  const v0 = samplesFilt[0].vy;
+
+  const header = ['t(s)','x(m)','y(m)','vx(m/s)','vy(m/s)','y_theo(m)','aTheory(m/s2)'];
+  const rows = samplesFilt.map(s => {
+    const y_theo = (s.t===0) ? y0 : (y0 + v0*s.t + 0.5*aTheory*s.t*s.t);
+    return [s.t.toFixed(4), s.x.toFixed(6), s.y.toFixed(6), s.vx.toFixed(6), s.vy.toFixed(6), y_theo.toFixed(6), aTheory.toFixed(6)].join(',');
+  });
   const csv = [header.join(','), ...rows].join('\n');
   const blob = new Blob([csv], {type:'text/csv'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'exao_kalman_filtered.csv';
+  a.download = `exao_kalman_filtered_${new Date().toISOString().replace(/[:.]/g,'-')}.csv`;
   document.body.appendChild(a); a.click(); a.remove();
+  console.log("CSV exporté automatiquement.");
+}
+
+exportCSVBtn.addEventListener("click", ()=>{
+  exportCSVAuto();
 });
 
 /* -------------------------
