@@ -601,7 +601,7 @@ function buildDoc2_MRU(samples){
 /* -------------------------
    Document MRUV : (t, y)
    ------------------------- */
-function buildDoc3_MRUV(samples){
+function buildDoc3_MRUV(samples) {
     const canvas = document.getElementById("doc3Chart");
     if (!canvas) {
         console.warn("Canvas #doc3Chart non trouvé dans le DOM.");
@@ -612,55 +612,112 @@ function buildDoc3_MRUV(samples){
     const T = samples.map(s => s.t);
     const Y = samples.map(s => s.y);
 
-    // régression quadratique A t^2 + B t + C  (normal equations)
+    // Récupérer l'angle depuis l'input
+    const alphaDeg = Number(angleInput ? angleInput.value : 0) || 0;
+    const aTheory = 9.81 * Math.sin(alphaDeg * Math.PI / 180);
+
+    // Conditions initiales
+    const y0 = samples[0].y;
+    const v0_y = samples[0].vy;
+
+    // Calcul de la position théorique
+    const y_theo = T.map(t => y0 + v0_y * t + 0.5 * aTheory * t * t);
+
+    // Régression quadratique pour obtenir les coefficients A, B, C
     const n = T.length;
     let S0 = n, S1 = 0, S2 = 0, S3 = 0, S4 = 0;
     let SX = 0, STX = 0, ST2X = 0;
-    for (let i=0;i<n;i++){
-        const t = T[i], x = Y[i], t2 = t*t;
-        S1 += t; S2 += t2; S3 += t2*t; S4 += t2*t2;
-        SX += x; STX += t*x; ST2X += t2*x;
+
+    for (let i = 0; i < n; i++) {
+        const t = T[i];
+        const x = Y[i];
+        const t2 = t * t;
+        S1 += t;
+        S2 += t2;
+        S3 += t2 * t;
+        S4 += t2 * t2;
+        SX += x;
+        STX += t * x;
+        ST2X += t2 * x;
     }
+
+    // Résolution du système d'équations pour A, B, C
     const M = [
-        [S4,S3,S2],
-        [S3,S2,S1],
-        [S2,S1,S0]
+        [S4, S3, S2],
+        [S3, S2, S1],
+        [S2, S1, S0]
     ];
     const V = [ST2X, STX, SX];
 
-    function solve3(M,V){
-        const [a,b,c] = M[0];
-        const [d,e,f] = M[1];
-        const [g,h,i] = M[2];
-        const det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g);
-        if (Math.abs(det) < 1e-12) return [0,0,0];
-        const Dx = (V[0]*(e*i - f*h) - b*(V[1]*i - f*V[2]) + c*(V[1]*h - e*V[2]));
-        const Dy = (a*(V[1]*i - f*V[2]) - V[0]*(d*i - f*g) + c*(d*V[2] - V[1]*g));
-        const Dz = (a*(e*V[2] - V[1]*h) - b*(d*V[2] - V[1]*g) + V[0]*(d*h - e*g));
-        return [Dx/det, Dy/det, Dz/det];
+    function solve3(M, V) {
+        const [a, b, c] = M[0];
+        const [d, e, f] = M[1];
+        const [g, h, i] = M[2];
+        const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+        if (Math.abs(det) < 1e-12) return [0, 0, 0];
+        const Dx = (V[0] * (e * i - f * h) - b * (V[1] * i - f * V[2]) + c * (V[1] * h - e * V[2]));
+        const Dy = (a * (V[1] * i - f * V[2]) - V[0] * (d * i - f * g) + c * (d * V[2] - V[1] * g));
+        const Dz = (a * (e * V[2] - V[1] * h) - b * (d * V[2] - V[1] * g) + V[0] * (d * h - e * g));
+        return [Dx / det, Dy / det, Dz / det];
     }
 
-    const [A,B,C] = solve3(M,V);
-    const a = 2*A;
-    const fit = T.map(t => A*t*t + B*t + C);
+    const [A, B, C] = solve3(M, V);
+    const a = 2 * A; // Accélération estimée
 
+    // Courbe ajustée
+    const fit = T.map(t => A * t * t + B * t + C);
+
+    // Création du graphique
     doc3Chart = new Chart(canvas, {
-        type: "line",
+        type: "scatter",
         data: {
-            labels: T,
             datasets: [
-                { label: "Position y (m)", data: Y, borderColor: "blue", fill:false, pointRadius:3 },
-                { label: `Fit: a=${a.toFixed(3)} m/s²`, data: fit, borderColor: "darkblue", fill:false, pointRadius:0, borderDash:[6,4] }
+                {
+                    label: "Position y (m)",
+                    data: Y.map((y, i) => ({ x: T[i], y: y })),
+                    borderColor: "blue",
+                    backgroundColor: "blue",
+                    showLine: true,
+                    pointRadius: 3,
+                },
+                {
+                    label: `Fit: a=${a.toFixed(4)} m/s²`,
+                    data: fit.map((y, i) => ({ x: T[i], y: y })),
+                    borderColor: "darkblue",
+                    borderDash: [6, 4],
+                    fill: false,
+                    pointRadius: 0,
+                    showLine: true,
+                },
+                {
+                    label: `Théorie: a=${aTheory.toFixed(4)} m/s²`,
+                    data: y_theo.map((y, i) => ({ x: T[i], y: y })),
+                    borderColor: "green",
+                    borderDash: [6, 4],
+                    fill: false,
+                    pointRadius: 0,
+                    showLine: true,
+                }
             ]
         },
         options: {
             responsive: true,
-            plugins:{ legend:{ display:true } },
+            plugins: {
+                legend: { display: true },
+                title: {
+                    display: true,
+                    text: `Mouvement Rectiligne Uniformément Varié (MRUV) - Région quadratique: a=${a.toFixed(4)} m/s²`,
+                },
+            },
             scales: {
-                x: { title: { display: true, text: "t (s)" } },
-                y: { title: { display: true, text: "y (m)" } }
-            }
-        }
+                x: {
+                    title: { display: true, text: "t (s)" },
+                },
+                y: {
+                    title: { display: true, text: "y (m)" },
+                },
+            },
+        },
     });
 }
 
