@@ -1,10 +1,9 @@
 /************************************************************
- * script.js - Détection stable d'objet en mouvement
+ * script.js - Détection stable d'objet en mouvement + calcul de l'angle du rail
  * - Soustraction de fond + prétraitement (niveaux de gris + flou)
  * - Lissage temporel (moyenne mobile)
- * - Seuil dynamique pour réduire le bruit
+ * - Détection automatique de l'angle du rail noir sur fond blanc
  * - Filtre de Kalman 2D (x,y + vx,vy)
- * - Overlay temps réel, traitement vidéo frame-by-frame
  ************************************************************/
 
 /* -------------------------
@@ -12,8 +11,9 @@
    ------------------------- */
 const REAL_DIAM_M = 0.15; // 15 cm (diamètre réel de l'objet)
 const MIN_PIXELS_FOR_DETECT = 40; // Nombre minimum de pixels pour valider une détection
-const motionThreshold = 35; // Seuil de différence pour détecter le mouvement (augmenté pour réduire le bruit)
+const motionThreshold = 35; // Seuil de différence pour détecter le mouvement
 const historyLength = 5; // Nombre de frames pour le lissage temporel
+const blackThreshold = 60; // Seuil de luminosité pour détecter le rail noir
 
 /* -------------------------
    STATE
@@ -29,6 +29,7 @@ let mediaRecorder = null;
 let videoStream = null;
 let backgroundImageData = null;
 let positionHistory = []; // Historique des positions pour le lissage
+let railAngleDetected = false; // Pour éviter de recalculer l'angle à chaque frame
 
 /* -------------------------
    DOM
@@ -89,6 +90,66 @@ function rgbToHsv(r, g, b) {
 }
 
 /* -------------------------
+   Détection de l'angle du rail (noir sur fond blanc)
+   ------------------------- */
+function detectRailAngle(imgData) {
+  const data = imgData.data;
+  const W = imgData.width;
+  const H = imgData.height;
+
+  // Trouver les pixels noirs (rail)
+  let railPixels = [];
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const luminosity = (r + g + b) / 3;
+      if (luminosity < blackThreshold) {
+        railPixels.push({ x, y });
+      }
+    }
+  }
+
+  if (railPixels.length < 100) {
+    console.error("Rail non détecté : trop peu de pixels noirs.");
+    return null;
+  }
+
+  // Trouver les bords supérieurs et inférieurs du rail
+  let minY = H;
+  let maxY = 0;
+  let minXForMinY = 0;
+  let minXForMaxY = 0;
+
+  for (const pixel of railPixels) {
+    if (pixel.y < minY) {
+      minY = pixel.y;
+      minXForMinY = pixel.x;
+    }
+    if (pixel.y > maxY) {
+      maxY = pixel.y;
+      minXForMaxY = pixel.x;
+    }
+  }
+
+  // Calculer l'angle du rail
+  const deltaX = minXForMaxY - minXForMinY;
+  const deltaY = maxY - minY;
+
+  if (deltaY === 0) {
+    console.error("Impossible de calculer l'angle : deltaY est nul.");
+    return null;
+  }
+
+  const angleRad = Math.atan2(deltaX, deltaY);
+  const angleDeg = angleRad * (180 / Math.PI);
+
+  return angleDeg;
+}
+
+/* -------------------------
    Prétraitement de l'image (niveaux de gris + flou)
    ------------------------- */
 function preprocessImage(imgData) {
@@ -100,10 +161,10 @@ function preprocessImage(imgData) {
   // Convertir en niveaux de gris
   for (let i = 0; i < data.length; i += 4) {
     const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-    processedData[i] = avg;     // R
-    processedData[i + 1] = avg; // G
-    processedData[i + 2] = avg; // B
-    processedData[i + 3] = data[i + 3]; // Alpha
+    processedData[i] = avg;
+    processedData[i + 1] = avg;
+    processedData[i + 2] = avg;
+    processedData[i + 3] = data[i + 3];
   }
 
   // Appliquer un flou léger (3x3)
@@ -136,7 +197,7 @@ function preprocessImage(imgData) {
 function captureBackground() {
   ctx.drawImage(preview, 0, 0, previewCanvas.width, previewCanvas.height);
   const imgData = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
-  backgroundImageData = preprocessImage(imgData); // Stocker le fond prétraité
+  backgroundImageData = preprocessImage(imgData);
   console.log("Fond capturé et prétraité.");
 }
 
@@ -149,7 +210,6 @@ function smoothPosition(currentPos) {
   if (positionHistory.length > historyLength) {
     positionHistory.shift();
   }
-  // Calculer la moyenne des positions
   let sumX = 0;
   let sumY = 0;
   for (const pos of positionHistory) {
@@ -185,7 +245,7 @@ function detectMotion(currentImageData) {
   }
   const meanDiff = differences.reduce((a, b) => a + b, 0) / differences.length;
   const stdDiff = Math.sqrt(differences.reduce((sq, n) => sq + Math.pow(n - meanDiff, 2), 0) / differences.length);
-  const dynamicThreshold = meanDiff + 2 * stdDiff; // Seuil dynamique
+  const dynamicThreshold = meanDiff + 2 * stdDiff;
 
   // Détecter les pixels en mouvement
   let sumX = 0;
@@ -264,7 +324,7 @@ function estimatePxToMeter(imgData) {
    Filtre de Kalman 2D
    ------------------------- */
 function createKalman() {
-  let x = [[0], [0], [0], [0]]; // [x, vx, y, vy]
+  let x = [[0], [0], [0], [0]];
   let P = identity(4, 1e3);
   const qPos = 1e-5;
   const qVel = 1e-3;
@@ -452,6 +512,7 @@ processBtn.addEventListener("click", async () => {
   samplesFilt = [];
   pxToMeter = null;
   positionHistory = [];
+  railAngleDetected = false;
   nSamplesSpan.textContent = "0";
   aEstimatedSpan.textContent = "—";
   aTheorySpan.textContent = "—";
@@ -476,6 +537,19 @@ processBtn.addEventListener("click", async () => {
     try {
       ctx.drawImage(vid, 0, 0, previewCanvas.width, previewCanvas.height);
       const img = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+
+      // Détecter l'angle du rail une seule fois
+      if (!railAngleDetected) {
+        const railAngle = detectRailAngle(img);
+        if (railAngle !== null) {
+          angleInput.value = railAngle.toFixed(2);
+          console.log("Angle du rail détecté :", railAngle, "degrés");
+          railAngleDetected = true;
+        } else {
+          console.error("Échec de la détection de l'angle du rail.");
+        }
+      }
+
       const processedImg = preprocessImage(img);
 
       if (!pxToMeter) {
@@ -555,11 +629,14 @@ function finalize() {
   const Y = samplesFilt.map((s) => s.y);
   const fit = fitQuadratic(T, Y);
   regEquationP.textContent = `y(t) = ${fit.a.toFixed(4)}·t² + ${fit.b.toFixed(4)}·t + ${fit.c.toFixed(4)}`;
+
   const aEst = 2 * fit.a;
   const alphaDeg = Number(angleInput.value) || 0;
   const aTheory = 9.81 * Math.sin((alphaDeg * Math.PI) / 180);
+
   aEstimatedSpan.textContent = aEst.toFixed(4);
   aTheorySpan.textContent = aTheory.toFixed(4);
+
   buildCharts(samplesFilt, aEst);
   setTimeout(() => buildPositionChart(samplesFilt, fit), 100);
   exportCSVBtn.disabled = false;
