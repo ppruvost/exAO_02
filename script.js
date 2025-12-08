@@ -731,32 +731,90 @@ function buildCharts(filteredSamples, aEst) {
 }
 
 /* -------------------------
-   Build position chart with quadratic fit
+   Build position chart with quadratic fit (style MRUV)
    ------------------------- */
 function buildPositionChart(samples, fit) {
   const T = samples.map((s) => s.t);
   const Y = samples.map((s) => s.y);
   const Y_fit = T.map((t) => fit.a * t * t + fit.b * t + fit.c);
+
   const ctx = document.getElementById("positionChart").getContext("2d");
 
-  if (positionChart) positionChart.destroy();
+  // Détruire le graphique précédent s'il existe
+  if (positionChart) {
+    positionChart.destroy();
+  }
+
+  // Créer le nouveau graphique avec Chart.js
   positionChart = new Chart(ctx, {
     type: "scatter",
     data: {
       datasets: [
-        { label: "Position mesurée (y en m)", data: T.map((t, i) => ({ x: t, y: Y[i] })), borderColor: "blue", backgroundColor: "blue", showLine: false, pointRadius: 4 },
-        { label: "Ajustement quadratique", data: T.map((t, i) => ({ x: t, y: Y_fit[i] })), borderColor: "red", backgroundColor: "red", showLine: true, pointRadius: 0, borderWidth: 2 },
+        {
+          label: "Position mesurée (y en m)",
+          data: T.map((t, i) => ({ x: t, y: Y[i] })),
+          borderColor: "blue",
+          backgroundColor: "blue",
+          showLine: false, // Ne pas relier les points mesurés
+          pointRadius: 4,
+          pointBackgroundColor: "blue",
+        },
+        {
+          label: "Ajustement quadratique (y = a·t² + b·t + c)",
+          data: T.map((t, i) => ({ x: t, y: Y_fit[i] })),
+          borderColor: "red",
+          backgroundColor: "red",
+          showLine: true, // Relier les points pour la courbe ajustée
+          pointRadius: 0,
+          borderWidth: 2,
+          tension: 0.1, // Lissage léger de la courbe
+        },
       ],
     },
     options: {
       responsive: true,
+      plugins: {
+        title: {
+          display: true,
+          text: "Position du mobile en fonction du temps (MRUV)",
+          font: {
+            size: 16,
+          },
+        },
+        legend: {
+          position: "top",
+        },
+      },
       scales: {
-        x: { title: { display: true, text: "Temps (s)" } },
-        y: { title: { display: true, text: "Position (m)" } },
+        x: {
+          title: {
+            display: true,
+            text: "Temps (t) en secondes",
+            font: {
+              size: 14,
+            },
+          },
+          grid: {
+            display: true,
+          },
+        },
+        y: {
+          title: {
+            display: true,
+            text: "Position (y) en mètres",
+            font: {
+              size: 14,
+            },
+          },
+          grid: {
+            display: true,
+          },
+        },
       },
     },
   });
 
+  // Afficher l'équation de la courbe ajustée
   const positionEquationElement = document.getElementById("positionEquation");
   positionEquationElement.textContent = `Équation : y(t) = ${fit.a.toFixed(4)}·t² + ${fit.b.toFixed(4)}·t + ${fit.c.toFixed(4)}`;
 }
