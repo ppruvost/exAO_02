@@ -1,29 +1,40 @@
 /************************************************************
- * script.js - exAO_02 (version intégrée : MRUA/MRUV/X(t)/CSV)
+ * script.js - Détection d'objet en mouvement par soustraction de fond
+ * - Soustraction de fond pour détecter l'objet en mouvement
+ * - Calibrage auto (diamètre = 0.15 m)
+ * - Filtre de Kalman 2D (x,y + vx,vy)
+ * - Overlay temps réel, traitement vidéo frame-by-frame
+ * - Ralenti ×0.25, export CSV, Chart.js
  ************************************************************/
+
 /* -------------------------
    CONFIG
    ------------------------- */
 const REAL_DIAM_M = 0.15; // 15 cm
 const MIN_PIXELS_FOR_DETECT = 40;
+const motionThreshold = 20; // Seuil de différence de couleur pour détecter le mouvement
+
 /* -------------------------
    STATE
    ------------------------- */
 let recordedChunks = [];
 let recordedBlob = null;
 let videoURL = null;
-let t0_detect = null; // moment où la balle est détectée pour la 1ère fois (temps relatif)
 let pxToMeter = null;
 let samplesRaw = [];   // {t, x_px, y_px, x_m, y_m}
 let samplesFilt = [];  // {t, x, y, vx, vy}
 let slowMotionFactor = 1;
 let mediaRecorder = null;
+let videoStream = null;
+let backgroundImageData = null;
+
 /* -------------------------
    DOM
    ------------------------- */
 const preview = document.getElementById("preview");
 const previewCanvas = document.getElementById("previewCanvas");
-previewCanvas.width = 640; previewCanvas.height = 480;
+previewCanvas.width = 640;
+previewCanvas.height = 480;
 const ctx = previewCanvas.getContext("2d");
 const startBtn = document.getElementById("startRecBtn");
 const stopBtn = document.getElementById("stopRecBtn");
@@ -40,73 +51,95 @@ const aEstimatedSpan = document.getElementById("aEstimated");
 const aTheorySpan = document.getElementById("aTheory");
 const regEquationP = document.getElementById("regEquation");
 const exportCSVBtn = document.getElementById("exportCSVBtn");
-const rampAngleDisplay = document.getElementById("rampAngleDisplay"); // Ajout pour afficher l'angle de la rampe
+const captureBgBtn = document.getElementById("captureBgBtn"); // Bouton pour capturer le fond
 
 /* Charts */
-let posChart = null, velChart = null, fitChart = null;
-let doc2Chart = null, doc3Chart = null; // MRU / MRUV charts
+let posChart = null;
+let velChart = null;
+let fitChart = null;
+let positionChart = null;
 
 /* -------------------------
    Utilities: RGB -> HSV
    ------------------------- */
 function rgbToHsv(r, g, b) {
-    r /= 255; g /= 255; b /= 255;
-    const max = Math.max(r, g, b), min = Math.min(r, g, b);
-    let h = 0, s = 0, v = max;
-    const d = max - min;
-    s = max === 0 ? 0 : d / max;
-    if (d !== 0) {
-        if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
-        else if (max === g) h = (b - r) / d + 2;
-        else h = (r - g) / d + 4;
-        h *= 60;
+  r /= 255;
+  g /= 255;
+  b /= 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  let h = 0;
+  let s = 0;
+  const v = max;
+  const d = max - min;
+  s = max === 0 ? 0 : d / max;
+  if (d !== 0) {
+    if (max === r) {
+      h = (g - b) / d + (g < b ? 6 : 0);
+    } else if (max === g) {
+      h = (b - r) / d + 2;
+    } else {
+      h = (r - g) / d + 4;
     }
-    return { h, s, v };
+    h *= 60;
+  }
+  return { h, s, v };
 }
 
 /* -------------------------
-   Detection: tuned HSV for light brown / ochre ~ (230,190,40)
-   returns centroid {x,y,count} in pixel coordinates, or null
+   Capture du fond
    ------------------------- */
-function detectBall(imgData, stride = 2) {
-  const data = imgData.data;
-  const W = imgData.width;
-  const H = imgData.height;
+function captureBackground() {
+  ctx.drawImage(preview, 0, 0, previewCanvas.width, previewCanvas.height);
+  backgroundImageData = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+  console.log("Fond capturé.");
+}
+
+/* -------------------------
+   Détection de mouvement
+   ------------------------- */
+function detectMotion(currentImageData) {
+  if (!backgroundImageData) {
+    console.error("Aucun fond capturé. Utilisez captureBackground().");
+    return null;
+  }
+
+  const currentData = currentImageData.data;
+  const bgData = backgroundImageData.data;
+  const W = currentImageData.width;
+  const H = currentImageData.height;
+
   let sumX = 0;
   let sumY = 0;
   let count = 0;
 
-  for (let y = 0; y < H; y += stride) {
-    for (let x = 0; x < W; x += stride) {
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
       const i = (y * W + x) * 4;
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      const hsv = rgbToHsv(r, g, b);
 
-      // Ajustement pour une balle de tennis (jaune fluo ou vert fluo)
-      const isTennisBall =
-        ((hsv.h >= 40 && hsv.h <= 70) || (hsv.h >= 60 && hsv.h <= 90)) &&
-        hsv.s >= 0.5 &&
-        hsv.v >= 0.5;
+      // Calculer la différence de couleur entre le fond et l'image actuelle
+      const dr = Math.abs(currentData[i] - bgData[i]);
+      const dg = Math.abs(currentData[i + 1] - bgData[i + 1]);
+      const db = Math.abs(currentData[i + 2] - bgData[i + 2]);
 
-      if (!isTennisBall) continue;
-
-      sumX += x;
-      sumY += y;
-      count++;
+      // Si la différence dépasse le seuil, considérer comme mouvement
+      if (dr > motionThreshold || dg > motionThreshold || db > motionThreshold) {
+        sumX += x;
+        sumY += y;
+        count++;
+      }
     }
   }
 
-  if (count < MIN_PIXELS_FOR_DETECT) return null;
+  if (count < MIN_PIXELS_FOR_DETECT) {
+    return null;
+  }
 
   return { x: sumX / count, y: sumY / count, count };
 }
 
-
 /* -------------------------
    Calibration: estimate pixels->meters using bounding box of candidate pixels
-   returns pxToMeter or null if not enough pixels
    ------------------------- */
 function estimatePxToMeter(imgData) {
   const data = imgData.data;
@@ -114,21 +147,21 @@ function estimatePxToMeter(imgData) {
   const H = imgData.height;
   let found = [];
 
+  // Utiliser la soustraction de fond pour trouver les pixels de l'objet
+  if (!backgroundImageData) {
+    console.error("Aucun fond capturé pour la calibration.");
+    return null;
+  }
+
+  const bgData = backgroundImageData.data;
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       const i = (y * W + x) * 4;
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      const hsv = rgbToHsv(r, g, b);
+      const dr = Math.abs(data[i] - bgData[i]);
+      const dg = Math.abs(data[i + 1] - bgData[i + 1]);
+      const db = Math.abs(data[i + 2] - bgData[i + 2]);
 
-      // Même plage de couleurs que pour `detectBall`
-      const isTennisBall =
-        ((hsv.h >= 40 && hsv.h <= 70) || (hsv.h >= 60 && hsv.h <= 90)) &&
-        hsv.s >= 0.5 &&
-        hsv.v >= 0.5;
-
-      if (isTennisBall) {
+      if (dr > motionThreshold || dg > motionThreshold || db > motionThreshold) {
         found.push({ x, y });
       }
     }
@@ -154,567 +187,544 @@ function estimatePxToMeter(imgData) {
   return REAL_DIAM_M / diamPx;
 }
 
-
 /* -------------------------
    Simple Kalman 2D (state [x, vx, y, vy])
    ------------------------- */
 function createKalman() {
-    let x = [[0], [0], [0], [0]];
-    let P = identity(4, 1e3);
-    const qPos = 1e-5, qVel = 1e-3;
-    let Q = [
-        [qPos, 0, 0, 0],
-        [0, qVel, 0, 0],
-        [0, 0, qPos, 0],
-        [0, 0, 0, qVel]
+  let x = [[0], [0], [0], [0]];
+  let P = identity(4, 1e3);
+  const qPos = 1e-5;
+  const qVel = 1e-3;
+  const Q = [
+    [qPos, 0, 0, 0],
+    [0, qVel, 0, 0],
+    [0, 0, qPos, 0],
+    [0, 0, 0, qVel],
+  ];
+  const H = [[1, 0, 0, 0], [0, 0, 1, 0]];
+  const R = [[1e-6, 0], [0, 1e-6]];
+
+  function predict(dt) {
+    const F = [
+      [1, dt, 0, 0],
+      [0, 1, 0, 0],
+      [0, 0, 1, dt],
+      [0, 0, 0, 1],
     ];
-    const H = [[1, 0, 0, 0], [0, 0, 1, 0]]; // measure x,y
-    let R = [[1e-6, 0], [0, 1e-6]];
-    function predict(dt) {
-        const F = [
-            [1, dt, 0, 0],
-            [0, 1, 0, 0],
-            [0, 0, 1, dt],
-            [0, 0, 0, 1]
-        ];
-        x = matMul(F, x);
-        P = add(matMul(matMul(F, P), transpose(F)), Q);
-    }
-    function update(z) {
-        const y_resid = sub(z, matMul(H, x));
-        const S = add(matMul(matMul(H, P), transpose(H)), R);
-        const K = matMul(matMul(P, transpose(H)), inv2x2(S));
-        x = add(x, matMul(K, y_resid));
-        const I = identity(4);
-        const KH = matMul(K, H);
-        P = matMul(sub(I, KH), P);
-    }
-    function setFromMeasurement(z) {
-        x = [[z[0][0]], [0], [z[1][0]], [0]];
-        P = identity(4, 1e-1);
-    }
-    function getState() {
-        return { x: x[0][0], vx: x[1][0], y: x[2][0], vy: x[3][0] };
-    }
-    return { predict, update, getState, setFromMeasurement };
+    x = matMul(F, x);
+    P = add(matMul(matMul(F, P), transpose(F)), Q);
+  }
+
+  function update(z) {
+    const y_resid = sub(z, matMul(H, x));
+    const S = add(matMul(matMul(H, P), transpose(H)), R);
+    const K = matMul(matMul(P, transpose(H)), inv2x2(S));
+    x = add(x, matMul(K, y_resid));
+    const I = identity(4);
+    const KH = matMul(K, H);
+    P = matMul(sub(I, KH), P);
+  }
+
+  function setFromMeasurement(z) {
+    x = [[z[0][0]], [0], [z[1][0]], [0]];
+    P = identity(4, 1e-1);
+  }
+
+  function getState() {
+    return { x: x[0][0], vx: x[1][0], y: x[2][0], vy: x[3][0] };
+  }
+
+  return { predict, update, getState, setFromMeasurement };
 }
 
 /* Matrix helpers */
 function identity(n, scale = 1) {
-    return Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => i === j ? scale : 0));
+  return Array.from({ length: n }, (_, i) =>
+    Array.from({ length: n }, (_, j) => (i === j ? scale : 0))
+  );
 }
-function transpose(A) { return A[0].map((_, c) => A.map(r => r[c])); }
+
+function transpose(A) {
+  return A[0].map((_, c) => A.map((r) => r[c]));
+}
+
 function matMul(A, B) {
-    const aR = A.length, aC = A[0].length, bC = B[0].length;
-    const C = Array.from({ length: aR }, () => Array.from({ length: bC }, () => 0));
-    for (let i = 0; i < aR; i++) {
-        for (let k = 0; k < aC; k++) {
-            const aik = A[i][k];
-            for (let j = 0; j < bC; j++) {
-                C[i][j] += aik * B[k][j];
-            }
-        }
+  const aR = A.length;
+  const aC = A[0].length;
+  const bC = B[0].length;
+  const C = Array.from({ length: aR }, () =>
+    Array.from({ length: bC }, () => 0)
+  );
+  for (let i = 0; i < aR; i++) {
+    for (let k = 0; k < aC; k++) {
+      const aik = A[i][k];
+      for (let j = 0; j < bC; j++) {
+        C[i][j] += aik * B[k][j];
+      }
     }
-    return C;
+  }
+  return C;
 }
-function add(A, B) { return A.map((row, i) => row.map((v, j) => v + B[i][j])); }
-function sub(A, B) { return A.map((row, i) => row.map((v, j) => v - B[i][j])); }
+
+function add(A, B) {
+  return A.map((row, i) => row.map((v, j) => v + B[i][j]));
+}
+
+function sub(A, B) {
+  return A.map((row, i) => row.map((v, j) => v - B[i][j]));
+}
+
 function inv2x2(M) {
-    const a = M[0][0], b = M[0][1], c = M[1][0], d = M[1][1];
-    const det = a * d - b * c;
-    if (Math.abs(det) < 1e-12) return [[1e12, 0], [0, 1e12]];
-    return [[d / det, -b / det], [-c / det, a / det]];
-}
-
-/* -------------------------
-   AUTO ANGLE: compute principal direction (PCA) from filtered samples (x,y in meters)
-   Returns angle in degrees (signed), positive when principal vector has positive y component.
-   We'll use absolute angle for computing g·sin(theta).
-   ------------------------- */
-function computePrincipalAngleDeg(samples) {
-    if (!samples || samples.length < 2) return NaN;
-    let mx = 0, my = 0;
-    for (const s of samples) { mx += s.x; my += s.y; }
-    mx /= samples.length; my /= samples.length;
-    let Sxx = 0, Sxy = 0, Syy = 0;
-    for (const s of samples) {
-        const dx = s.x - mx, dy = s.y - my;
-        Sxx += dx * dx;
-        Sxy += dx * dy;
-        Syy += dy * dy;
-    }
-    Sxx /= samples.length;
-    Sxy /= samples.length;
-    Syy /= samples.length;
-    const theta = 0.5 * Math.atan2(2 * Sxy, Sxx - Syy);
-    let angleDeg = theta * 180 / Math.PI;
-    const first = samples[0], last = samples[samples.length - 1];
-    const dx = last.x - first.x, dy = last.y - first.y;
-    if (dx === 0 && dy === 0) return Math.abs(angleDeg);
-    const dirAngle = Math.atan2(dy, dx) * 180 / Math.PI;
-    let delta = dirAngle - angleDeg;
-    while (delta > 180) delta -= 360;
-    while (delta < -180) delta += 360;
-    if (Math.abs(delta) > 90) angleDeg += 180;
-    while (angleDeg >= 180) angleDeg -= 360;
-    while (angleDeg < -180) angleDeg += 360;
-    return angleDeg;
-}
-
-/* -------------------------
-   Detect Ramp Points: Detect points along the ramp
-   ------------------------- */
-function detectRampPoints(imgData) {
-    const data = imgData.data;
-    const W = imgData.width, H = imgData.height;
-    let points = [];
-
-    // Example: Detect white points (adjust thresholds as needed)
-    for (let y = 0; y < H; y++) {
-        for (let x = 0; x < W; x++) {
-            const i = (y * W + x) * 4;
-            const r = data[i], g = data[i + 1], b = data[i + 2];
-
-            // Adjust the condition to detect the ramp (e.g., white color)
-            if (r > 200 && g > 200 && b > 200) {
-                points.push({ x, y });
-            }
-        }
-    }
-
-    return points;
-}
-
-/* -------------------------
-   Display Ramp Angle: Display the computed angle on the screen
-   ------------------------- */
-function displayRampAngle(angleDeg) {
-    if (rampAngleDisplay) {
-        rampAngleDisplay.textContent = `Angle de la rampe: ${angleDeg.toFixed(2)}°`;
-    }
+  const a = M[0][0];
+  const b = M[0][1];
+  const c = M[1][0];
+  const d = M[1][1];
+  const det = a * d - b * c;
+  if (Math.abs(det) < 1e-12) return [[1e12, 0], [0, 1e12]];
+  return [[d / det, -b / det], [-c / det, a / det]];
 }
 
 /* -------------------------
    Camera preview + overlay (real-time)
    ------------------------- */
 async function startPreview() {
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
-        preview.srcObject = stream;
-
-        setInterval(() => {
-            try {
-                ctx.drawImage(preview, 0, 0, previewCanvas.width, previewCanvas.height);
-                const img = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
-
-                // Detect ramp points
-                const rampPoints = detectRampPoints(img);
-
-                if (rampPoints.length > 0) {
-                    // Calculate angle
-                    const angleDeg = computePrincipalAngleDeg(rampPoints);
-                    displayRampAngle(angleDeg);
-                }
-
-                const pos = detectBall(img, 4);
-                if (pos) {
-                    ctx.beginPath();
-                    ctx.strokeStyle = "lime";
-                    ctx.lineWidth = 3;
-                    ctx.arc(pos.x, pos.y, 12, 0, Math.PI * 2);
-                    ctx.stroke();
-                }
-            } catch (e) { }
-        }, 120);
-    } catch (e) {
-        console.warn("preview failed", e);
-    }
+  try {
+    videoStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480 }
+    });
+    preview.srcObject = videoStream;
+    previewLoop();
+    return true;
+  } catch (e) {
+    console.error("Erreur accès caméra :", e);
+    alert("Impossible d'accéder à la caméra. Vérifiez les permissions ou utilisez un navigateur compatible (Chrome, Firefox, Edge).");
+    return false;
+  }
 }
 
-startPreview();
+function previewLoop() {
+  if (preview.readyState >= 2) {
+    ctx.drawImage(preview, 0, 0, previewCanvas.width, previewCanvas.height);
+    const img = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+
+    if (!backgroundImageData) {
+      // Optionnel : capturer automatiquement le fond après un délai
+    } else {
+      const pos = detectMotion(img);
+      if (pos) {
+        ctx.beginPath();
+        ctx.strokeStyle = "lime";
+        ctx.lineWidth = 3;
+        ctx.arc(pos.x, pos.y, 12, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+  }
+  requestAnimationFrame(previewLoop);
+}
 
 /* -------------------------
    Recording handlers
    ------------------------- */
 startBtn.addEventListener("click", async () => {
-    if (!preview.srcObject) {
-        try { const s = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } }); preview.srcObject = s; }
-        catch (e) { alert("Accès caméra refusé"); return; }
-    }
-    recordedChunks = [];
-    try { mediaRecorder = new MediaRecorder(preview.srcObject, { mimeType: "video/webm;codecs=vp9" }); }
-    catch (e) { mediaRecorder = new MediaRecorder(preview.srcObject); }
-    mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) recordedChunks.push(e.data); };
-    mediaRecorder.onstop = async () => {
-        recordedBlob = new Blob(recordedChunks, { type: "video/webm" });
-        videoURL = URL.createObjectURL(recordedBlob);
-        processBtn.disabled = false; slowMoBtn.disabled = false;
-        blobSizeP && (blobSizeP.textContent = `Vidéo enregistrée (${(recordedBlob.size / 1024 / 1024).toFixed(2)} MB)`);
-        try { processBtn.click(); } catch (e) { console.error("Erreur lancement auto process:", e); }
-    };
-    mediaRecorder.start();
-    recStateP.textContent = "État : enregistrement...";
-    startBtn.disabled = true; stopBtn.disabled = false;
+  if (!videoStream) {
+    const success = await startPreview();
+    if (!success) return;
+  }
+  recordedChunks = [];
+  try {
+    mediaRecorder = new MediaRecorder(videoStream, { mimeType: "video/webm;codecs=vp9" });
+  } catch (e) {
+    mediaRecorder = new MediaRecorder(videoStream);
+  }
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data && e.data.size) recordedChunks.push(e.data);
+  };
+  mediaRecorder.onstop = () => {
+    recordedBlob = new Blob(recordedChunks, { type: "video/webm" });
+    videoURL = URL.createObjectURL(recordedBlob);
+    processBtn.disabled = false;
+    slowMoBtn.disabled = false;
+    blobSizeP.textContent = `Vidéo enregistrée (${(recordedBlob.size / 1024 / 1024).toFixed(2)} MB)`;
+  };
+  mediaRecorder.start();
+  recStateP.textContent = "État : enregistrement...";
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
 });
 
 stopBtn.addEventListener("click", () => {
-    if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    mediaRecorder.stop();
     recStateP.textContent = "État : arrêté";
-    startBtn.disabled = false; stopBtn.disabled = true;
-});
-
-loadBtn.addEventListener("click", () => fileInput.click());
-fileInput.addEventListener("change", () => {
-    const f = fileInput.files[0];
-    if (!f) return;
-    recordedBlob = f;
-    videoURL = URL.createObjectURL(f);
-    processBtn.disabled = false; slowMoBtn.disabled = false;
-    blobSizeP && (blobSizeP.textContent = `Fichier chargé (${(f.size / 1024 / 1024).toFixed(2)} MB)`);
-    try { processBtn.click(); } catch (e) { console.error("auto process load err", e); }
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+  }
 });
 
 /* -------------------------
    Process recorded video (frame-by-frame)
    ------------------------- */
 processBtn.addEventListener("click", async () => {
-    if (!videoURL) { alert("Aucune vidéo. Enregistre ou charge un fichier."); return; }
-    samplesRaw = []; samplesFilt = []; pxToMeter = null;
-    t0_detect = null;
-    nSamplesSpan.textContent = "0";
-    aEstimatedSpan.textContent = "—";
-    aTheorySpan.textContent = "—";
-    regEquationP.textContent = "Équation : —";
-    exportCSVBtn.disabled = true;
-    const vid = document.createElement("video");
-    vid.src = videoURL;
-    vid.muted = true;
-    await new Promise((res, rej) => { vid.onloadedmetadata = () => res(); vid.onerror = e => rej(e); });
-    const stepSec = Math.max(1, Number(frameStepMsInput.value) || 10) / 1000;
-    const kf = createKalman();
-    let initialized = false;
-    let prevT = null;
-    function processFrame() {
-        try {
-            ctx.drawImage(vid, 0, 0, previewCanvas.width, previewCanvas.height);
-            const img = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
-            if (!pxToMeter) {
-                const cal = estimatePxToMeter(img);
-                if (cal) {
-                    pxToMeter = cal;
-                    const pxDisp = document.getElementById("pxToMeterDisplay");
-                    if (pxDisp) pxDisp.textContent = pxToMeter.toFixed(6) + " m/px";
-                }
-            }
-            const pos = detectBall(img, 2);
-            const absT = vid.currentTime * slowMotionFactor;
-            let relT;
-            if (pos) {
-                if (t0_detect === null) t0_detect = absT;
-                relT = absT - t0_detect;
-            } else {
-                relT = null;
-            }
-            if (pos) {
-                const x_px = pos.x, y_px = pos.y;
-                const x_m = pxToMeter ? x_px * pxToMeter : NaN;
-                const y_m = pxToMeter ? y_px * pxToMeter : NaN;
-                samplesRaw.push({ t: relT, x_px, y_px, x_m, y_m });
-                if (pxToMeter && Number.isFinite(x_m) && Number.isFinite(y_m)) {
-                    const z = [[x_m], [y_m]];
-                    if (!initialized) {
-                        kf.setFromMeasurement(z);
-                        initialized = true;
-                        prevT = relT;
-                    } else {
-                        const dt = Math.max(1e-6, relT - prevT);
-                        kf.predict(dt);
-                        kf.update(z);
-                        prevT = relT;
-                    }
-                    const st = kf.getState();
-                    samplesFilt.push({ t: relT, x: st.x, y: st.y, vx: st.vx, vy: st.vy });
-                    ctx.beginPath(); ctx.strokeStyle = "rgba(255,0,0,0.7)"; ctx.lineWidth = 2;
-                    ctx.arc(x_px, y_px, 6, 0, Math.PI * 2); ctx.stroke();
-                    const fx_px = pxToMeter ? st.x / pxToMeter : st.x;
-                    const fy_px = pxToMeter ? st.y / pxToMeter : st.y;
-                    ctx.beginPath(); ctx.strokeStyle = "cyan"; ctx.lineWidth = 2;
-                    ctx.arc(fx_px, fy_px, 10, 0, Math.PI * 2); ctx.stroke();
-                    nSamplesSpan.textContent = String(samplesRaw.length);
-                }
-            }
-            if (vid.currentTime + 0.0001 < vid.duration) {
-                vid.currentTime = Math.min(vid.duration, vid.currentTime + stepSec);
-            } else {
-                finalize();
-                return;
-            }
-        } catch (err) {
-            console.error("processFrame error", err);
-            finalize();
-            return;
+  if (!videoURL) {
+    alert("Aucune vidéo. Enregistrez ou chargez un fichier.");
+    return;
+  }
+
+  // Reset
+  samplesRaw = [];
+  samplesFilt = [];
+  pxToMeter = null;
+  nSamplesSpan.textContent = "0";
+  aEstimatedSpan.textContent = "—";
+  aTheorySpan.textContent = "—";
+  regEquationP.textContent = "Équation : —";
+  exportCSVBtn.disabled = true;
+
+  const vid = document.createElement("video");
+  vid.src = videoURL;
+  vid.muted = true;
+
+  await new Promise((res, rej) => {
+    vid.onloadedmetadata = () => res();
+    vid.onerror = (e) => rej(e);
+  });
+
+  const stepSec = Math.max(1, Number(frameStepMsInput.value) || 10) / 1000;
+  const kf = createKalman();
+  let initialized = false;
+  let prevT = 0;
+
+  function processFrame() {
+    try {
+      ctx.drawImage(vid, 0, 0, previewCanvas.width, previewCanvas.height);
+      const img = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+
+      if (!pxToMeter) {
+        const cal = estimatePxToMeter(img);
+        if (cal) {
+          pxToMeter = cal;
+          const pxDisp = document.getElementById("pxToMeterDisplay");
+          if (pxDisp) pxDisp.textContent = pxToMeter.toFixed(6) + " m/px";
         }
-        vid.onseeked = processFrame;
+      }
+
+      const pos = detectMotion(img);
+      const t = vid.currentTime * slowMotionFactor;
+
+      if (pos) {
+        const x_px = pos.x;
+        const y_px = pos.y;
+        const x_m = pxToMeter ? x_px * pxToMeter : NaN;
+        const y_m = pxToMeter ? y_px * pxToMeter : NaN;
+
+        samplesRaw.push({ t, x_px, y_px, x_m, y_m });
+
+        if (pxToMeter && !isNaN(x_m) && !isNaN(y_m)) {
+          const z = [[x_m], [y_m]];
+          if (!initialized) {
+            kf.setFromMeasurement(z);
+            initialized = true;
+            prevT = t;
+          } else {
+            const dt = Math.max(1e-3, t - prevT);
+            kf.predict(dt);
+            kf.update(z);
+            prevT = t;
+          }
+          const st = kf.getState();
+          samplesFilt.push({
+            t,
+            x: st.x,
+            y: st.y,
+            vx: st.vx,
+            vy: st.vy,
+          });
+          nSamplesSpan.textContent = samplesRaw.length.toString();
+        }
+      }
+
+      if (vid.currentTime + 0.0001 < vid.duration) {
+        vid.currentTime = Math.min(vid.duration, vid.currentTime + stepSec);
+      } else {
+        finalize();
+        return;
+      }
+    } catch (err) {
+      console.error("processFrame error", err);
+      finalize();
+      return;
     }
-    vid.currentTime = 0;
+  }
+
+  vid.onseeked = processFrame;
+  vid.currentTime = 0;
 });
 
 /* -------------------------
    Finalize analysis: compute a, update charts
    ------------------------- */
 function finalize() {
-    if (samplesFilt.length < 3) {
-        alert("Données insuffisantes après filtrage (vérifie détection / calibration).");
-        return;
-    }
-    const T = samplesFilt.map(s => s.t);
-    const V = samplesFilt.map(s => Math.hypot(s.vx, s.vy));
-    const Y = samplesFilt.map(s => s.y);
-    const X = samplesFilt.map(s => s.x);
-    let num = 0, den = 0;
-    for (let i = 0; i < T.length; i++) {
-        if (Number.isFinite(V[i]) && Number.isFinite(T[i])) {
-            num += T[i] * V[i];
-            den += T[i] * T[i];
-        }
-    }
-    const aEst = den ? num / den : NaN;
-    const alphaDeg = Number(angleInput ? angleInput.value : 0) || 0;
-    const aTheory = 9.8 * Math.sin(alphaDeg * Math.PI / 180);
-    aEstimatedSpan.textContent = Number.isFinite(aEst) ? aEst.toFixed(4) : "—";
-    aTheorySpan.textContent = aTheory.toFixed(4);
-    regEquationP.textContent = Number.isFinite(aEst) ? `v = ${aEst.toFixed(4)} · t` : "Équation : —";
-    buildCharts(samplesFilt, aEst);
-    const y0 = samplesFilt[0].y;
-    const v0_y = samplesFilt[0].vy;
-    const g = 9.81;
-    const a_theo = aTheory;
-    const y_theo = T.map(t => y0 + v0_y * t + 0.5 * a_theo * t * t);
-    if (alphaDeg === 0) {
-        buildDoc2_MRU(samplesFilt);
-    } else {
-        buildDoc3_MRUV(samplesFilt);
-        if (doc3Chart) {
-            const ds = { label: `Théorie a=g·sinθ (${a_theo.toFixed(4)} m/s²)`, data: y_theo, borderColor: 'green', borderDash: [6, 4], fill: false, pointRadius: 0 };
-            let found = false;
-            doc3Chart.data.datasets.forEach((d, i) => {
-                if (d.label && d.label.startsWith("Théorie a=g·sinθ")) { doc3Chart.data.datasets[i] = ds; found = true; }
-            });
-            if (!found) doc3Chart.data.datasets.push(ds);
-            doc3Chart.update();
-        }
-    }
-    exportCSVBtn.disabled = false;
-    try { exportCSVAuto(); } catch (e) { console.error("export CSV auto failed", e); }
+  console.log("Données filtrées :", samplesFilt);
+  if (samplesFilt.length < 3) {
+    alert("Données insuffisantes après filtrage (vérifiez la détection / calibration).");
+    return;
+  }
+  const T = samplesFilt.map((s) => s.t);
+  const Y = samplesFilt.map((s) => s.y);
+  const fit = fitQuadratic(T, Y);
+  regEquationP.textContent = `y(t) = ${fit.a.toFixed(4)}·t² + ${fit.b.toFixed(4)}·t + ${fit.c.toFixed(4)}`;
+  const aEst = 2 * fit.a;
+  const alphaDeg = Number(angleInput.value) || 0;
+  const aTheory = 9.81 * Math.sin((alphaDeg * Math.PI) / 180);
+  aEstimatedSpan.textContent = aEst.toFixed(4);
+  aTheorySpan.textContent = aTheory.toFixed(4);
+  buildCharts(samplesFilt, aEst);
+  setTimeout(() => buildPositionChart(samplesFilt, fit), 100);
+  exportCSVBtn.disabled = false;
+}
+
+/* -------------------------
+   Fit quadratic function (y = a*t^2 + b*t + c)
+   ------------------------- */
+function fitQuadratic(T, Y) {
+  const n = T.length;
+  let sumT = 0;
+  let sumT2 = 0;
+  let sumT3 = 0;
+  let sumT4 = 0;
+  let sumY = 0;
+  let sumTY = 0;
+  let sumT2Y = 0;
+  for (let i = 0; i < n; i++) {
+    const t = T[i];
+    const y = Y[i];
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const t4 = t3 * t;
+    sumT += t;
+    sumT2 += t2;
+    sumT3 += t3;
+    sumT4 += t4;
+    sumY += y;
+    sumTY += t * y;
+    sumT2Y += t2 * y;
+  }
+  const A = [
+    [sumT4, sumT3, sumT2],
+    [sumT3, sumT2, sumT],
+    [sumT2, sumT, n],
+  ];
+  const B = [sumT2Y, sumTY, sumY];
+  const detA =
+    A[0][0] * (A[1][1] * A[2][2] - A[1][2] * A[2][1]) -
+    A[0][1] * (A[1][0] * A[2][2] - A[1][2] * A[2][0]) +
+    A[0][2] * (A[1][0] * A[2][1] - A[1][1] * A[2][0]);
+  const detA1 =
+    B[0] * (A[1][1] * A[2][2] - A[1][2] * A[2][1]) -
+    A[0][1] * (B[1] * A[2][2] - A[1][2] * B[2]) +
+    A[0][2] * (B[1] * A[2][1] - A[1][1] * B[2]);
+  const detA2 =
+    A[0][0] * (B[1] * A[2][2] - A[1][2] * B[2]) -
+    B[0] * (A[1][0] * A[2][2] - A[1][2] * A[2][0]) +
+    A[0][2] * (A[1][0] * B[2] - B[1] * A[2][0]);
+  const detA3 =
+    A[0][0] * (A[1][1] * B[2] - B[1] * A[2][1]) -
+    A[0][1] * (A[1][0] * B[2] - B[1] * A[2][0]) +
+    B[0] * (A[1][0] * A[2][1] - A[1][1] * A[2][0]);
+  const a = detA1 / detA;
+  const b = detA2 / detA;
+  const c = detA3 / detA;
+  return { a, b, c };
 }
 
 /* -------------------------
    Build charts (filtered data)
    ------------------------- */
 function buildCharts(filteredSamples, aEst) {
-    const T = filteredSamples.map(s => s.t);
-    const Y = filteredSamples.map(s => s.y);
-    const X = filteredSamples.map(s => s.x);
-    const V = filteredSamples.map(s => Math.hypot(s.vx, s.vy));
-    if (posChart) posChart.destroy();
-    posChart = new Chart(document.getElementById("posChart"), {
-        type: 'line',
-        data: {
-            labels: T,
-            datasets: [
-                { label: 'Position filtrée y (m)', data: Y, borderColor: 'cyan', fill: false },
-                { label: 'Position filtrée x (m)', data: X, borderColor: 'red', fill: false }
-            ]
+  const T = filteredSamples.map((s) => s.t);
+  const Y = filteredSamples.map((s) => s.y);
+  const V = filteredSamples.map((s) => Math.hypot(s.vx, s.vy));
+
+  if (posChart) posChart.destroy();
+  posChart = new Chart(document.getElementById("posChart"), {
+    type: "line",
+    data: {
+      labels: T,
+      datasets: [
+        {
+          label: "Position filtrée y (m)",
+          data: Y,
+          borderColor: "cyan",
+          fill: false,
         },
-        options: { scales: { x: { title: { display: true, text: 't (s)' } }, y: { title: { display: true, text: 'position (m)' } } } }
-    });
-    if (velChart) velChart.destroy();
-    velChart = new Chart(document.getElementById("velChart"), {
-        type: 'line',
-        data: { labels: T, datasets: [{ label: 'Vitesse filtrée (m/s)', data: V, borderColor: 'magenta', fill: false }] },
-        options: { scales: { x: { title: { display: true, text: 't (s)' } }, y: { title: { display: true, text: 'v (m/s)' } } } }
-    });
-    const points = T.map((t, i) => ({ x: t, y: V[i] }));
-    const fitLine = T.map(t => ({ x: t, y: aEst * t }));
-    if (fitChart) fitChart.destroy();
-    fitChart = new Chart(document.getElementById("fitChart"), {
-        type: 'scatter',
-        data: {
-            datasets: [
-                { label: 'Vitesse filtrée', data: points, pointRadius: 3 },
-                { label: 'Ajustement v = a·t', data: fitLine, type: 'line', borderColor: 'orange', fill: false }
-            ]
+      ],
+    },
+    options: {
+      scales: {
+        x: { title: { display: true, text: "t (s)" } },
+        y: { title: { display: true, text: "y (m)" } },
+      },
+    },
+  });
+
+  if (velChart) velChart.destroy();
+  velChart = new Chart(document.getElementById("velChart"), {
+    type: "line",
+    data: {
+      labels: T,
+      datasets: [
+        {
+          label: "Vitesse filtrée (m/s)",
+          data: V,
+          borderColor: "magenta",
+          fill: false,
         },
-        options: { scales: { x: { title: { display: true, text: 't (s)' } }, y: { title: { display: true, text: 'v (m/s)' } } } }
-    });
+      ],
+    },
+    options: {
+      scales: {
+        x: { title: { display: true, text: "t (s)" } },
+        y: { title: { display: true, text: "v (m/s)" } },
+      },
+    },
+  });
+
+  const points = T.map((t, i) => ({ x: t, y: V[i] }));
+  const fitLine = T.map((t) => ({ x: t, y: aEst * t }));
+
+  if (fitChart) fitChart.destroy();
+  fitChart = new Chart(document.getElementById("fitChart"), {
+    type: "scatter",
+    data: {
+      datasets: [
+        {
+          label: "Vitesse filtrée",
+          data: points,
+          pointRadius: 3,
+        },
+        {
+          label: "Ajustement v = a·t",
+          data: fitLine,
+          type: "line",
+          borderColor: "orange",
+          fill: false,
+        },
+      ],
+    },
+    options: {
+      scales: {
+        x: { title: { display: true, text: "t (s)" } },
+        y: { title: { display: true, text: "v (m/s)" } },
+      },
+    },
+  });
 }
 
 /* -------------------------
-   Document MRU : (t, x)
+   Build position chart with quadratic fit
    ------------------------- */
-function buildDoc2_MRU(samples) {
-    const canvas = document.getElementById("doc2Chart");
-    if (!canvas) { console.warn("Canvas #doc2Chart non trouvé dans le DOM."); return; }
-    if (doc2Chart) doc2Chart.destroy();
-    const T = samples.map(s => s.t);
-    const X = samples.map(s => s.x);
-    doc2Chart = new Chart(canvas, {
-        type: "line",
-        data: {
-            labels: T,
-            datasets: [
-                { label: "Position x (m)", data: X, borderColor: "red", fill: false, pointRadius: 3 }
-            ]
+function buildPositionChart(samples, fit) {
+  const T = samples.map((s) => s.t);
+  const Y = samples.map((s) => s.y);
+  const Y_fit = T.map((t) => fit.a * t * t + fit.b * t + fit.c);
+  const ctx = document.getElementById("positionChart").getContext("2d");
+
+  if (positionChart) {
+    positionChart.destroy();
+  }
+
+  positionChart = new Chart(ctx, {
+    type: "scatter",
+    data: {
+      datasets: [
+        {
+          label: "Position mesurée (y en m)",
+          data: T.map((t, i) => ({ x: t, y: Y[i] })),
+          borderColor: "blue",
+          backgroundColor: "blue",
+          showLine: false,
+          pointRadius: 4,
         },
-        options: {
-            responsive: true,
-            plugins: { legend: { display: true } },
-            scales: {
-                x: { title: { display: true, text: "t (s)" } },
-                y: { title: { display: true, text: "x (m)" } }
-            }
-        }
-    });
+        {
+          label: "Ajustement quadratique (y = a·t² + b·t + c)",
+          data: T.map((t, i) => ({ x: t, y: Y_fit[i] })),
+          borderColor: "red",
+          backgroundColor: "red",
+          showLine: true,
+          pointRadius: 0,
+          borderWidth: 2,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      scales: {
+        x: {
+          title: {
+            display: true,
+            text: "Temps (s)",
+          },
+        },
+        y: {
+          title: {
+            display: true,
+            text: "Position (m)",
+          },
+        },
+      },
+    },
+  });
+
+  const positionEquationElement = document.getElementById("positionEquation");
+  positionEquationElement.textContent = `Équation : y(t) = ${fit.a.toFixed(4)}·t² + ${fit.b.toFixed(4)}·t + ${fit.c.toFixed(4)}`;
 }
 
 /* -------------------------
-   Document MRUV : (t, y)
+   Export CSV (filtered)
    ------------------------- */
-function buildDoc3_MRUV(samples) {
-    const canvas = document.getElementById("doc3Chart");
-    if (!canvas) { console.warn("Canvas #doc3Chart non trouvé dans le DOM."); return; }
-    if (doc3Chart) doc3Chart.destroy();
-    const T = samples.map(s => s.t);
-    const Y = samples.map(s => s.y);
-    const alphaDeg = Number(angleInput ? angleInput.value : 0) || 0;
-    const aTheory = 9.81 * Math.sin(alphaDeg * Math.PI / 180);
-    const y0 = samples[0].y;
-    const v0_y = samples[0].vy;
-    const y_theo = T.map(t => y0 + v0_y * t + 0.5 * aTheory * t * t);
-    const n = T.length;
-    let S0 = n, S1 = 0, S2 = 0, S3 = 0, S4 = 0;
-    let SX = 0, STX = 0, ST2X = 0;
-    for (let i = 0; i < n; i++) {
-        const t = T[i];
-        const x = Y[i];
-        const t2 = t * t;
-        S1 += t;
-        S2 += t2;
-        S3 += t2 * t;
-        S4 += t2 * t2;
-        SX += x;
-        STX += t * x;
-        ST2X += t2 * x;
-    }
-    const M = [
-        [S4, S3, S2],
-        [S3, S2, S1],
-        [S2, S1, S0]
-    ];
-    const V = [ST2X, STX, SX];
-    function solve3(M, V) {
-        const [a, b, c] = M[0];
-        const [d, e, f] = M[1];
-        const [g, h, i] = M[2];
-        const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
-        if (Math.abs(det) < 1e-12) return [0, 0, 0];
-        const Dx = (V[0] * (e * i - f * h) - b * (V[1] * i - f * V[2]) + c * (V[1] * h - e * V[2]));
-        const Dy = (a * (V[1] * i - f * V[2]) - V[0] * (d * i - f * g) + c * (d * V[2] - V[1] * g));
-        const Dz = (a * (e * V[2] - V[1] * h) - b * (d * V[2] - V[1] * g) + V[0] * (d * h - e * g));
-        return [Dx / det, Dy / det, Dz / det];
-    }
-    const [A, B, C] = solve3(M, V);
-    const a = 2 * A;
-    const fit = T.map(t => A * t * t + B * t + C);
-    doc3Chart = new Chart(canvas, {
-        type: "scatter",
-        data: {
-            datasets: [
-                {
-                    label: "Position y (m)",
-                    data: Y.map((y, i) => ({ x: T[i], y: y })),
-                    borderColor: "blue",
-                    backgroundColor: "blue",
-                    showLine: true,
-                    pointRadius: 3,
-                },
-                {
-                    label: `Fit: a=${a.toFixed(4)} m/s²`,
-                    data: fit.map((y, i) => ({ x: T[i], y: y })),
-                    borderColor: "darkblue",
-                    borderDash: [6, 4],
-                    fill: false,
-                    pointRadius: 0,
-                    showLine: true,
-                },
-                {
-                    label: `Théorie: a=${aTheory.toFixed(4)} m/s²`,
-                    data: y_theo.map((y, i) => ({ x: T[i], y: y })),
-                    borderColor: "green",
-                    borderDash: [6, 4],
-                    fill: false,
-                    pointRadius: 0,
-                    showLine: true,
-                }
-            ]
-        },
-        options: {
-            responsive: true,
-            plugins: {
-                legend: { display: true },
-                title: {
-                    display: true,
-                    text: `Mouvement Rectiligne Uniformément Varié (MRUV) - Région quadratique: a=${a.toFixed(4)} m/s²`,
-                },
-            },
-            scales: {
-                x: {
-                    title: { display: true, text: "t (s)" },
-                },
-                y: {
-                    title: { display: true, text: "y (m)" },
-                },
-            },
-        },
-    });
-}
-
-/* -------------------------
-   Export CSV (filtered)  + auto export
-   ------------------------- */
-function exportCSVAuto() {
-    if (!samplesFilt.length) { console.warn("Aucune donnée filtrée : CSV non généré."); return; }
-    const alphaDeg = Number(angleInput ? angleInput.value : 0) || 0;
-    const aTheory = 9.8 * Math.sin(alphaDeg * Math.PI / 180);
-    const y0 = samplesFilt[0].y;
-    const v0 = samplesFilt[0].vy;
-    const header = ['t(s)', 'x(m)', 'y(m)', 'vx(m/s)', 'vy(m/s)', 'y_theo(m)', 'aTheory(m/s2)'];
-    const rows = samplesFilt.map(s => {
-        const y_theo = (s.t === 0) ? y0 : (y0 + v0 * s.t + 0.5 * aTheory * s.t * s.t);
-        return [s.t.toFixed(4), s.x.toFixed(6), s.y.toFixed(6), s.vx.toFixed(6), s.vy.toFixed(6), y_theo.toFixed(6), aTheory.toFixed(6)].join(',');
-    });
-    const csv = [header.join(','), ...rows].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `exao_kalman_filtered_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
-    document.body.appendChild(a); a.click(); a.remove();
-    console.log("CSV exporté automatiquement.");
-}
-
 exportCSVBtn.addEventListener("click", () => {
-    exportCSVAuto();
+  if (!samplesFilt.length) {
+    alert("Aucune donnée filtrée.");
+    return;
+  }
+  const header = ["t(s)", "x(m)", "y(m)", "vx(m/s)", "vy(m/s)"];
+  const rows = samplesFilt.map(
+    (s) =>
+      `${s.t.toFixed(4)},${s.x.toFixed(6)},${s.y.toFixed(6)},${s.vx.toFixed(
+        6
+      )},${s.vy.toFixed(6)}`
+  );
+  const csv = [header.join(","), ...rows].join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "exao_kalman_filtered.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 });
 
 /* -------------------------
    Ralenti toggle
    ------------------------- */
 slowMoBtn.addEventListener("click", () => {
-    if (slowMotionFactor === 1) {
-        slowMotionFactor = 0.25;
-        slowMoBtn.textContent = "Ralenti ×1 (normal)";
-    } else {
-        slowMotionFactor = 1;
-        slowMoBtn.textContent = "Ralenti ×0.25";
-    }
+  if (slowMotionFactor === 1) {
+    slowMotionFactor = 0.25;
+    slowMoBtn.textContent = "Ralenti ×1 (normal)";
+  } else {
+    slowMotionFactor = 1;
+    slowMoBtn.textContent = "Ralenti ×0.25";
+  }
+});
+
+/* -------------------------
+   Bouton pour capturer le fond
+   ------------------------- */
+captureBgBtn.addEventListener("click", captureBackground);
+
+// Initialisation
+startPreview();
+document.addEventListener('DOMContentLoaded', async () => {
+  await startPreview();
 });
