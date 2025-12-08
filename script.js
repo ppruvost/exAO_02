@@ -69,55 +69,91 @@ function rgbToHsv(r, g, b) {
    returns centroid {x,y,count} in pixel coordinates, or null
    ------------------------- */
 function detectBall(imgData, stride = 2) {
-    const data = imgData.data;
-    const W = imgData.width, H = imgData.height;
-    let sumX = 0, sumY = 0, count = 0;
-    for (let y = 0; y < H; y += stride) {
-        for (let x = 0; x < W; x += stride) {
-            const i = (y * W + x) * 4;
-            const r = data[i], g = data[i + 1], b = data[i + 2];
-            const hsv = rgbToHsv(r, g, b);
-            // thresholds (adjustable)
-            const ok = hsv.h >= 28 && hsv.h <= 55 && hsv.s >= 0.22 && hsv.v >= 0.45;
-            if (!ok) continue;
-            if (r + g + b < 120) continue; // avoid dark spots
-            sumX += x; sumY += y; count++;
-        }
+  const data = imgData.data;
+  const W = imgData.width;
+  const H = imgData.height;
+  let sumX = 0;
+  let sumY = 0;
+  let count = 0;
+
+  for (let y = 0; y < H; y += stride) {
+    for (let x = 0; x < W; x += stride) {
+      const i = (y * W + x) * 4;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const hsv = rgbToHsv(r, g, b);
+
+      // Ajustement pour une balle de tennis (jaune fluo ou vert fluo)
+      const isTennisBall =
+        ((hsv.h >= 40 && hsv.h <= 70) || (hsv.h >= 60 && hsv.h <= 90)) &&
+        hsv.s >= 0.5 &&
+        hsv.v >= 0.5;
+
+      if (!isTennisBall) continue;
+
+      sumX += x;
+      sumY += y;
+      count++;
     }
-    if (count < MIN_PIXELS_FOR_DETECT) return null;
-    return { x: sumX / count, y: sumY / count, count };
+  }
+
+  if (count < MIN_PIXELS_FOR_DETECT) return null;
+
+  return { x: sumX / count, y: sumY / count, count };
 }
+
 
 /* -------------------------
    Calibration: estimate pixels->meters using bounding box of candidate pixels
    returns pxToMeter or null if not enough pixels
    ------------------------- */
 function estimatePxToMeter(imgData) {
-    const data = imgData.data;
-    const W = imgData.width, H = imgData.height;
-    let found = [];
-    for (let y = 0; y < H; y++) {
-        for (let x = 0; x < W; x++) {
-            const i = (y * W + x) * 4;
-            const r = data[i], g = data[i + 1], b = data[i + 2];
-            const hsv = rgbToHsv(r, g, b);
-            if (hsv.h >= 28 && hsv.h <= 55 && hsv.s >= 0.22 && hsv.v >= 0.45 && (r + g + b > 120)) {
-                found.push({ x, y });
-            }
-        }
+  const data = imgData.data;
+  const W = imgData.width;
+  const H = imgData.height;
+  let found = [];
+
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const hsv = rgbToHsv(r, g, b);
+
+      // Même plage de couleurs que pour `detectBall`
+      const isTennisBall =
+        ((hsv.h >= 40 && hsv.h <= 70) || (hsv.h >= 60 && hsv.h <= 90)) &&
+        hsv.s >= 0.5 &&
+        hsv.v >= 0.5;
+
+      if (isTennisBall) {
+        found.push({ x, y });
+      }
     }
-    if (found.length < 200) return null;
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const p of found) {
-        if (p.x < minX) minX = p.x;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.y > maxY) maxY = p.y;
-    }
-    const diamPx = Math.max(maxX - minX, maxY - minY);
-    if (diamPx <= 2) return null;
-    return REAL_DIAM_M / diamPx;
+  }
+
+  if (found.length < 200) return null;
+
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+
+  for (const p of found) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+
+  const diamPx = Math.max(maxX - minX, maxY - minY);
+  if (diamPx <= 2) return null;
+
+  return REAL_DIAM_M / diamPx;
 }
+
 
 /* -------------------------
    Simple Kalman 2D (state [x, vx, y, vy])
