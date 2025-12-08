@@ -143,7 +143,8 @@ function detectRailAngle(imgData) {
     return null;
   }
 
-  const angleRad = Math.atan2(deltaX, deltaY);
+  // Calculer l'angle en radians puis en degrés (valeur absolue)
+  const angleRad = Math.atan2(Math.abs(deltaX), Math.abs(deltaY));
   const angleDeg = angleRad * (180 / Math.PI);
 
   return angleDeg;
