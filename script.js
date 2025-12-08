@@ -723,21 +723,32 @@ function buildCharts(filteredSamples, aEst) {
 }
 
 /* -------------------------
-   Build position chart with quadratic fit (style MRUV)
+   Build position chart with quadratic fit (MRUV)
    ------------------------- */
 function buildPositionChart(samples, fit) {
+  if (samples.length === 0) {
+    console.error("Aucune donnée à afficher.");
+    return;
+  }
+
   const T = samples.map((s) => s.t);
   const Y = samples.map((s) => s.y);
   const Y_fit = T.map((t) => fit.a * t * t + fit.b * t + fit.c);
 
-  const ctx = document.getElementById("positionChart").getContext("2d");
+  const canvas = document.getElementById("positionChart");
+  if (!canvas) {
+    console.error("Élément positionChart non trouvé dans le DOM.");
+    return;
+  }
+
+  const ctx = canvas.getContext("2d");
 
   // Détruire le graphique précédent s'il existe
   if (positionChart) {
     positionChart.destroy();
   }
 
-  // Créer le nouveau graphique avec Chart.js
+  // Créer le graphique avec Chart.js
   positionChart = new Chart(ctx, {
     type: "scatter",
     data: {
@@ -747,19 +758,17 @@ function buildPositionChart(samples, fit) {
           data: T.map((t, i) => ({ x: t, y: Y[i] })),
           borderColor: "blue",
           backgroundColor: "blue",
-          showLine: false, // Ne pas relier les points mesurés
+          showLine: false,
           pointRadius: 4,
-          pointBackgroundColor: "blue",
         },
         {
-          label: "Ajustement quadratique (y = a·t² + b·t + c)",
+          label: "Régression quadratique (y = a·t² + b·t + c)",
           data: T.map((t, i) => ({ x: t, y: Y_fit[i] })),
           borderColor: "red",
           backgroundColor: "red",
-          showLine: true, // Relier les points pour la courbe ajustée
+          showLine: true,
           pointRadius: 0,
           borderWidth: 2,
-          tension: 0.1, // Lissage léger de la courbe
         },
       ],
     },
@@ -769,9 +778,7 @@ function buildPositionChart(samples, fit) {
         title: {
           display: true,
           text: "Position du mobile en fonction du temps (MRUV)",
-          font: {
-            size: 16,
-          },
+          font: { size: 16 },
         },
         legend: {
           position: "top",
@@ -782,25 +789,15 @@ function buildPositionChart(samples, fit) {
           title: {
             display: true,
             text: "Temps (t) en secondes",
-            font: {
-              size: 14,
-            },
           },
-          grid: {
-            display: true,
-          },
+          grid: { display: true },
         },
         y: {
           title: {
             display: true,
             text: "Position (y) en mètres",
-            font: {
-              size: 14,
-            },
           },
-          grid: {
-            display: true,
-          },
+          grid: { display: true },
         },
       },
     },
@@ -808,7 +805,9 @@ function buildPositionChart(samples, fit) {
 
   // Afficher l'équation de la courbe ajustée
   const positionEquationElement = document.getElementById("positionEquation");
-  positionEquationElement.textContent = `Équation : y(t) = ${fit.a.toFixed(4)}·t² + ${fit.b.toFixed(4)}·t + ${fit.c.toFixed(4)}`;
+  if (positionEquationElement) {
+    positionEquationElement.textContent = `Équation : y(t) = ${fit.a.toFixed(4)}·t² + ${fit.b.toFixed(4)}·t + ${fit.c.toFixed(4)}`;
+  }
 }
 
 /* -------------------------
