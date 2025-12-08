@@ -12,7 +12,7 @@
    ------------------------- */
 const REAL_DIAM_M = 0.15; // 15 cm
 const MIN_PIXELS_FOR_DETECT = 40;
-const motionThreshold = 20; // Seuil de différence de couleur pour détecter le mouvement
+const motionThreshold = 40; // Seuil de différence de couleur pour détecter le mouvement
 
 /* -------------------------
    STATE
