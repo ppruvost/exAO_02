@@ -57,7 +57,6 @@ const exportCSVBtn = document.getElementById("exportCSVBtn");
 const captureBgBtn = document.getElementById("captureBgBtn");
 
 /* Charts */
-let posChart = null;
 let velChart = null;
 let fitChart = null;
 let positionChart = null;
@@ -699,13 +698,6 @@ function buildCharts(filteredSamples, aEst) {
   const T = filteredSamples.map((s) => s.t);
   const Y = filteredSamples.map((s) => s.y);
   const V = filteredSamples.map((s) => Math.hypot(s.vx, s.vy));
-
-  if (posChart) posChart.destroy();
-  posChart = new Chart(document.getElementById("posChart"), {
-    type: "line",
-    data: { labels: T, datasets: [{ label: "Position filtrée y (m)", data: Y, borderColor: "cyan" }] },
-    options: { scales: { x: { title: { display: true, text: "t (s)" } }, y: { title: { display: true, text: "y (m)" } } } },
-  });
 
   if (velChart) velChart.destroy();
   velChart = new Chart(document.getElementById("velChart"), {
