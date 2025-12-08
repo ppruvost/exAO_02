@@ -1,18 +1,19 @@
 /************************************************************
- * script.js - Détection d'objet en mouvement par soustraction de fond
- * - Soustraction de fond pour détecter l'objet en mouvement
- * - Calibrage auto (diamètre = 0.15 m)
+ * script.js - Détection stable d'objet en mouvement
+ * - Soustraction de fond + prétraitement (niveaux de gris + flou)
+ * - Lissage temporel (moyenne mobile)
+ * - Seuil dynamique pour réduire le bruit
  * - Filtre de Kalman 2D (x,y + vx,vy)
  * - Overlay temps réel, traitement vidéo frame-by-frame
- * - Ralenti ×0.25, export CSV, Chart.js
  ************************************************************/
 
 /* -------------------------
    CONFIG
    ------------------------- */
-const REAL_DIAM_M = 0.15; // 15 cm
-const MIN_PIXELS_FOR_DETECT = 40;
-const motionThreshold = 40; // Seuil de différence de couleur pour détecter le mouvement
+const REAL_DIAM_M = 0.15; // 15 cm (diamètre réel de l'objet)
+const MIN_PIXELS_FOR_DETECT = 40; // Nombre minimum de pixels pour valider une détection
+const motionThreshold = 35; // Seuil de différence pour détecter le mouvement (augmenté pour réduire le bruit)
+const historyLength = 5; // Nombre de frames pour le lissage temporel
 
 /* -------------------------
    STATE
@@ -27,6 +28,7 @@ let slowMotionFactor = 1;
 let mediaRecorder = null;
 let videoStream = null;
 let backgroundImageData = null;
+let positionHistory = []; // Historique des positions pour le lissage
 
 /* -------------------------
    DOM
@@ -51,7 +53,7 @@ const aEstimatedSpan = document.getElementById("aEstimated");
 const aTheorySpan = document.getElementById("aTheory");
 const regEquationP = document.getElementById("regEquation");
 const exportCSVBtn = document.getElementById("exportCSVBtn");
-const captureBgBtn = document.getElementById("captureBgBtn"); // Bouton pour capturer le fond
+const captureBgBtn = document.getElementById("captureBgBtn");
 
 /* Charts */
 let posChart = null;
@@ -87,20 +89,86 @@ function rgbToHsv(r, g, b) {
 }
 
 /* -------------------------
+   Prétraitement de l'image (niveaux de gris + flou)
+   ------------------------- */
+function preprocessImage(imgData) {
+  const data = imgData.data;
+  const W = imgData.width;
+  const H = imgData.height;
+  const processedData = new Uint8ClampedArray(data.length);
+
+  // Convertir en niveaux de gris
+  for (let i = 0; i < data.length; i += 4) {
+    const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+    processedData[i] = avg;     // R
+    processedData[i + 1] = avg; // G
+    processedData[i + 2] = avg; // B
+    processedData[i + 3] = data[i + 3]; // Alpha
+  }
+
+  // Appliquer un flou léger (3x3)
+  const blurredData = new Uint8ClampedArray(processedData.length);
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      const i = (y * W + x) * 4;
+      let sumR = 0, sumG = 0, sumB = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const neighborIdx = ((y + dy) * W + (x + dx)) * 4;
+          sumR += processedData[neighborIdx];
+          sumG += processedData[neighborIdx + 1];
+          sumB += processedData[neighborIdx + 2];
+        }
+      }
+      blurredData[i] = sumR / 9;
+      blurredData[i + 1] = sumG / 9;
+      blurredData[i + 2] = sumB / 9;
+      blurredData[i + 3] = processedData[i + 3];
+    }
+  }
+
+  return new ImageData(blurredData, W, H);
+}
+
+/* -------------------------
    Capture du fond
    ------------------------- */
 function captureBackground() {
   ctx.drawImage(preview, 0, 0, previewCanvas.width, previewCanvas.height);
-  backgroundImageData = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
-  console.log("Fond capturé.");
+  const imgData = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+  backgroundImageData = preprocessImage(imgData); // Stocker le fond prétraité
+  console.log("Fond capturé et prétraité.");
 }
 
 /* -------------------------
-   Détection de mouvement
+   Lissage temporel (moyenne mobile)
+   ------------------------- */
+function smoothPosition(currentPos) {
+  if (!currentPos) return null;
+  positionHistory.push(currentPos);
+  if (positionHistory.length > historyLength) {
+    positionHistory.shift();
+  }
+  // Calculer la moyenne des positions
+  let sumX = 0;
+  let sumY = 0;
+  for (const pos of positionHistory) {
+    sumX += pos.x;
+    sumY += pos.y;
+  }
+  return {
+    x: sumX / positionHistory.length,
+    y: sumY / positionHistory.length,
+    count: currentPos.count
+  };
+}
+
+/* -------------------------
+   Détection de mouvement avec seuil dynamique
    ------------------------- */
 function detectMotion(currentImageData) {
   if (!backgroundImageData) {
-    console.error("Aucun fond capturé. Utilisez captureBackground().");
+    console.error("Aucun fond capturé.");
     return null;
   }
 
@@ -109,21 +177,25 @@ function detectMotion(currentImageData) {
   const W = currentImageData.width;
   const H = currentImageData.height;
 
+  // Calculer la moyenne et l'écart-type des différences
+  let differences = [];
+  for (let i = 0; i < currentData.length; i += 4) {
+    const diff = Math.abs(currentData[i] - bgData[i]);
+    differences.push(diff);
+  }
+  const meanDiff = differences.reduce((a, b) => a + b, 0) / differences.length;
+  const stdDiff = Math.sqrt(differences.reduce((sq, n) => sq + Math.pow(n - meanDiff, 2), 0) / differences.length);
+  const dynamicThreshold = meanDiff + 2 * stdDiff; // Seuil dynamique
+
+  // Détecter les pixels en mouvement
   let sumX = 0;
   let sumY = 0;
   let count = 0;
-
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       const i = (y * W + x) * 4;
-
-      // Calculer la différence de couleur entre le fond et l'image actuelle
-      const dr = Math.abs(currentData[i] - bgData[i]);
-      const dg = Math.abs(currentData[i + 1] - bgData[i + 1]);
-      const db = Math.abs(currentData[i + 2] - bgData[i + 2]);
-
-      // Si la différence dépasse le seuil, considérer comme mouvement
-      if (dr > motionThreshold || dg > motionThreshold || db > motionThreshold) {
+      const diff = Math.abs(currentData[i] - bgData[i]);
+      if (diff > dynamicThreshold) {
         sumX += x;
         sumY += y;
         count++;
@@ -131,37 +203,42 @@ function detectMotion(currentImageData) {
     }
   }
 
-  if (count < MIN_PIXELS_FOR_DETECT) {
-    return null;
-  }
-
+  if (count < MIN_PIXELS_FOR_DETECT) return null;
   return { x: sumX / count, y: sumY / count, count };
 }
 
 /* -------------------------
-   Calibration: estimate pixels->meters using bounding box of candidate pixels
+   Calibration: estimation pixels->mètres
    ------------------------- */
 function estimatePxToMeter(imgData) {
-  const data = imgData.data;
-  const W = imgData.width;
-  const H = imgData.height;
-  let found = [];
-
-  // Utiliser la soustraction de fond pour trouver les pixels de l'objet
   if (!backgroundImageData) {
     console.error("Aucun fond capturé pour la calibration.");
     return null;
   }
 
+  const processedImg = preprocessImage(imgData);
+  const currentData = processedImg.data;
   const bgData = backgroundImageData.data;
+  const W = processedImg.width;
+  const H = processedImg.height;
+
+  // Calculer la moyenne et l'écart-type des différences
+  let differences = [];
+  for (let i = 0; i < currentData.length; i += 4) {
+    const diff = Math.abs(currentData[i] - bgData[i]);
+    differences.push(diff);
+  }
+  const meanDiff = differences.reduce((a, b) => a + b, 0) / differences.length;
+  const stdDiff = Math.sqrt(differences.reduce((sq, n) => sq + Math.pow(n - meanDiff, 2), 0) / differences.length);
+  const dynamicThreshold = meanDiff + 2 * stdDiff;
+
+  // Trouver les pixels de l'objet
+  let found = [];
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       const i = (y * W + x) * 4;
-      const dr = Math.abs(data[i] - bgData[i]);
-      const dg = Math.abs(data[i + 1] - bgData[i + 1]);
-      const db = Math.abs(data[i + 2] - bgData[i + 2]);
-
-      if (dr > motionThreshold || dg > motionThreshold || db > motionThreshold) {
+      const diff = Math.abs(currentData[i] - bgData[i]);
+      if (diff > dynamicThreshold) {
         found.push({ x, y });
       }
     }
@@ -169,11 +246,8 @@ function estimatePxToMeter(imgData) {
 
   if (found.length < 200) return null;
 
-  let minX = Infinity;
-  let maxX = -Infinity;
-  let minY = Infinity;
-  let maxY = -Infinity;
-
+  // Calculer la boîte englobante
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   for (const p of found) {
     if (p.x < minX) minX = p.x;
     if (p.x > maxX) maxX = p.x;
@@ -183,15 +257,14 @@ function estimatePxToMeter(imgData) {
 
   const diamPx = Math.max(maxX - minX, maxY - minY);
   if (diamPx <= 2) return null;
-
   return REAL_DIAM_M / diamPx;
 }
 
 /* -------------------------
-   Simple Kalman 2D (state [x, vx, y, vy])
+   Filtre de Kalman 2D
    ------------------------- */
 function createKalman() {
-  let x = [[0], [0], [0], [0]];
+  let x = [[0], [0], [0], [0]]; // [x, vx, y, vy]
   let P = identity(4, 1e3);
   const qPos = 1e-5;
   const qVel = 1e-3;
@@ -221,8 +294,7 @@ function createKalman() {
     const K = matMul(matMul(P, transpose(H)), inv2x2(S));
     x = add(x, matMul(K, y_resid));
     const I = identity(4);
-    const KH = matMul(K, H);
-    P = matMul(sub(I, KH), P);
+    P = matMul(sub(I, matMul(K, H)), P);
   }
 
   function setFromMeasurement(z) {
@@ -245,7 +317,7 @@ function identity(n, scale = 1) {
 }
 
 function transpose(A) {
-  return A[0].map((_, c) => A.map((r) => r[c]));
+  return A[0].map((_, c) => A.map(r => r[c]));
 }
 
 function matMul(A, B) {
@@ -297,7 +369,7 @@ async function startPreview() {
     return true;
   } catch (e) {
     console.error("Erreur accès caméra :", e);
-    alert("Impossible d'accéder à la caméra. Vérifiez les permissions ou utilisez un navigateur compatible (Chrome, Firefox, Edge).");
+    alert("Impossible d'accéder à la caméra. Vérifiez les permissions.");
     return false;
   }
 }
@@ -306,17 +378,21 @@ function previewLoop() {
   if (preview.readyState >= 2) {
     ctx.drawImage(preview, 0, 0, previewCanvas.width, previewCanvas.height);
     const img = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+    const processedImg = preprocessImage(img);
 
     if (!backgroundImageData) {
-      // Optionnel : capturer automatiquement le fond après un délai
+      // Optionnel : capturer automatiquement le fond
     } else {
-      const pos = detectMotion(img);
+      const pos = detectMotion(processedImg);
       if (pos) {
-        ctx.beginPath();
-        ctx.strokeStyle = "lime";
-        ctx.lineWidth = 3;
-        ctx.arc(pos.x, pos.y, 12, 0, Math.PI * 2);
-        ctx.stroke();
+        const smoothedPos = smoothPosition(pos);
+        if (smoothedPos) {
+          ctx.beginPath();
+          ctx.strokeStyle = "lime";
+          ctx.lineWidth = 3;
+          ctx.arc(smoothedPos.x, smoothedPos.y, 12, 0, Math.PI * 2);
+          ctx.stroke();
+        }
       }
     }
   }
@@ -375,6 +451,7 @@ processBtn.addEventListener("click", async () => {
   samplesRaw = [];
   samplesFilt = [];
   pxToMeter = null;
+  positionHistory = [];
   nSamplesSpan.textContent = "0";
   aEstimatedSpan.textContent = "—";
   aTheorySpan.textContent = "—";
@@ -399,6 +476,7 @@ processBtn.addEventListener("click", async () => {
     try {
       ctx.drawImage(vid, 0, 0, previewCanvas.width, previewCanvas.height);
       const img = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+      const processedImg = preprocessImage(img);
 
       if (!pxToMeter) {
         const cal = estimatePxToMeter(img);
@@ -409,38 +487,41 @@ processBtn.addEventListener("click", async () => {
         }
       }
 
-      const pos = detectMotion(img);
+      const pos = detectMotion(processedImg);
       const t = vid.currentTime * slowMotionFactor;
 
       if (pos) {
-        const x_px = pos.x;
-        const y_px = pos.y;
-        const x_m = pxToMeter ? x_px * pxToMeter : NaN;
-        const y_m = pxToMeter ? y_px * pxToMeter : NaN;
+        const smoothedPos = smoothPosition(pos);
+        if (smoothedPos) {
+          const x_px = smoothedPos.x;
+          const y_px = smoothedPos.y;
+          const x_m = pxToMeter ? x_px * pxToMeter : NaN;
+          const y_m = pxToMeter ? y_px * pxToMeter : NaN;
 
-        samplesRaw.push({ t, x_px, y_px, x_m, y_m });
+          samplesRaw.push({ t, x_px, y_px, x_m, y_m });
 
-        if (pxToMeter && !isNaN(x_m) && !isNaN(y_m)) {
-          const z = [[x_m], [y_m]];
-          if (!initialized) {
-            kf.setFromMeasurement(z);
-            initialized = true;
-            prevT = t;
-          } else {
-            const dt = Math.max(1e-3, t - prevT);
-            kf.predict(dt);
-            kf.update(z);
-            prevT = t;
+          if (pxToMeter && !isNaN(x_m) && !isNaN(y_m)) {
+            const z = [[x_m], [y_m]];
+            if (!initialized) {
+              kf.setFromMeasurement(z);
+              initialized = true;
+              prevT = t;
+            } else {
+              const dt = Math.max(1e-3, t - prevT);
+              kf.predict(dt);
+              kf.update(z);
+              prevT = t;
+            }
+            const st = kf.getState();
+            samplesFilt.push({
+              t,
+              x: st.x,
+              y: st.y,
+              vx: st.vx,
+              vy: st.vy,
+            });
+            nSamplesSpan.textContent = samplesRaw.length.toString();
           }
-          const st = kf.getState();
-          samplesFilt.push({
-            t,
-            x: st.x,
-            y: st.y,
-            vx: st.vx,
-            vy: st.vy,
-          });
-          nSamplesSpan.textContent = samplesRaw.length.toString();
         }
       }
 
@@ -467,7 +548,7 @@ processBtn.addEventListener("click", async () => {
 function finalize() {
   console.log("Données filtrées :", samplesFilt);
   if (samplesFilt.length < 3) {
-    alert("Données insuffisantes après filtrage (vérifiez la détection / calibration).");
+    alert("Données insuffisantes après filtrage.");
     return;
   }
   const T = samplesFilt.map((s) => s.t);
@@ -489,13 +570,8 @@ function finalize() {
    ------------------------- */
 function fitQuadratic(T, Y) {
   const n = T.length;
-  let sumT = 0;
-  let sumT2 = 0;
-  let sumT3 = 0;
-  let sumT4 = 0;
-  let sumY = 0;
-  let sumTY = 0;
-  let sumT2Y = 0;
+  let sumT = 0, sumT2 = 0, sumT3 = 0, sumT4 = 0;
+  let sumY = 0, sumTY = 0, sumT2Y = 0;
   for (let i = 0; i < n; i++) {
     const t = T[i];
     const y = Y[i];
@@ -549,45 +625,15 @@ function buildCharts(filteredSamples, aEst) {
   if (posChart) posChart.destroy();
   posChart = new Chart(document.getElementById("posChart"), {
     type: "line",
-    data: {
-      labels: T,
-      datasets: [
-        {
-          label: "Position filtrée y (m)",
-          data: Y,
-          borderColor: "cyan",
-          fill: false,
-        },
-      ],
-    },
-    options: {
-      scales: {
-        x: { title: { display: true, text: "t (s)" } },
-        y: { title: { display: true, text: "y (m)" } },
-      },
-    },
+    data: { labels: T, datasets: [{ label: "Position filtrée y (m)", data: Y, borderColor: "cyan" }] },
+    options: { scales: { x: { title: { display: true, text: "t (s)" } }, y: { title: { display: true, text: "y (m)" } } } },
   });
 
   if (velChart) velChart.destroy();
   velChart = new Chart(document.getElementById("velChart"), {
     type: "line",
-    data: {
-      labels: T,
-      datasets: [
-        {
-          label: "Vitesse filtrée (m/s)",
-          data: V,
-          borderColor: "magenta",
-          fill: false,
-        },
-      ],
-    },
-    options: {
-      scales: {
-        x: { title: { display: true, text: "t (s)" } },
-        y: { title: { display: true, text: "v (m/s)" } },
-      },
-    },
+    data: { labels: T, datasets: [{ label: "Vitesse filtrée (m/s)", data: V, borderColor: "magenta" }] },
+    options: { scales: { x: { title: { display: true, text: "t (s)" } }, y: { title: { display: true, text: "v (m/s)" } } } },
   });
 
   const points = T.map((t, i) => ({ x: t, y: V[i] }));
@@ -598,26 +644,11 @@ function buildCharts(filteredSamples, aEst) {
     type: "scatter",
     data: {
       datasets: [
-        {
-          label: "Vitesse filtrée",
-          data: points,
-          pointRadius: 3,
-        },
-        {
-          label: "Ajustement v = a·t",
-          data: fitLine,
-          type: "line",
-          borderColor: "orange",
-          fill: false,
-        },
+        { label: "Vitesse filtrée", data: points, pointRadius: 3 },
+        { label: "Ajustement v = a·t", data: fitLine, type: "line", borderColor: "orange" },
       ],
     },
-    options: {
-      scales: {
-        x: { title: { display: true, text: "t (s)" } },
-        y: { title: { display: true, text: "v (m/s)" } },
-      },
-    },
+    options: { scales: { x: { title: { display: true, text: "t (s)" } }, y: { title: { display: true, text: "v (m/s)" } } } },
   });
 }
 
@@ -630,48 +661,20 @@ function buildPositionChart(samples, fit) {
   const Y_fit = T.map((t) => fit.a * t * t + fit.b * t + fit.c);
   const ctx = document.getElementById("positionChart").getContext("2d");
 
-  if (positionChart) {
-    positionChart.destroy();
-  }
-
+  if (positionChart) positionChart.destroy();
   positionChart = new Chart(ctx, {
     type: "scatter",
     data: {
       datasets: [
-        {
-          label: "Position mesurée (y en m)",
-          data: T.map((t, i) => ({ x: t, y: Y[i] })),
-          borderColor: "blue",
-          backgroundColor: "blue",
-          showLine: false,
-          pointRadius: 4,
-        },
-        {
-          label: "Ajustement quadratique (y = a·t² + b·t + c)",
-          data: T.map((t, i) => ({ x: t, y: Y_fit[i] })),
-          borderColor: "red",
-          backgroundColor: "red",
-          showLine: true,
-          pointRadius: 0,
-          borderWidth: 2,
-        },
+        { label: "Position mesurée (y en m)", data: T.map((t, i) => ({ x: t, y: Y[i] })), borderColor: "blue", backgroundColor: "blue", showLine: false, pointRadius: 4 },
+        { label: "Ajustement quadratique", data: T.map((t, i) => ({ x: t, y: Y_fit[i] })), borderColor: "red", backgroundColor: "red", showLine: true, pointRadius: 0, borderWidth: 2 },
       ],
     },
     options: {
       responsive: true,
       scales: {
-        x: {
-          title: {
-            display: true,
-            text: "Temps (s)",
-          },
-        },
-        y: {
-          title: {
-            display: true,
-            text: "Position (m)",
-          },
-        },
+        x: { title: { display: true, text: "Temps (s)" } },
+        y: { title: { display: true, text: "Position (m)" } },
       },
     },
   });
@@ -689,12 +692,7 @@ exportCSVBtn.addEventListener("click", () => {
     return;
   }
   const header = ["t(s)", "x(m)", "y(m)", "vx(m/s)", "vy(m/s)"];
-  const rows = samplesFilt.map(
-    (s) =>
-      `${s.t.toFixed(4)},${s.x.toFixed(6)},${s.y.toFixed(6)},${s.vx.toFixed(
-        6
-      )},${s.vy.toFixed(6)}`
-  );
+  const rows = samplesFilt.map((s) => `${s.t.toFixed(4)},${s.x.toFixed(6)},${s.y.toFixed(6)},${s.vx.toFixed(6)},${s.vy.toFixed(6)}`);
   const csv = [header.join(","), ...rows].join("\n");
   const blob = new Blob([csv], { type: "text/csv" });
   const a = document.createElement("a");
