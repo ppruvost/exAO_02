@@ -1,391 +1,338 @@
-/**********************************************
- * exAO v02 — SCRIPT PRINCIPAL
- * Correction complète + CSV + Charts + Caméra
- **********************************************/
+/************************************************************
+ * script.js - Détection stable d'objet en mouvement + calcul
+ * de l'angle du rail
+ ************************************************************/
 
-// ----------- Variables globales -----------
+/* -------------------------
+   CONFIG
+------------------------- */
+const REAL_DIAM_M = 0.15; // 15 cm
+const MIN_PIXELS_FOR_DETECT = 40;
+const motionThreshold = 35;
+const historyLength = 5;
+const blackThreshold = 60;
+
+/* -------------------------
+   STATE
+------------------------- */
+let recordedChunks = [];
+let recordedBlob = null;
+let videoURL = null;
+let pxToMeter = null;
+let samplesRaw = [];
+let samplesFilt = [];
+let slowMotionFactor = 1;
+let mediaRecorder = null;
 let videoStream = null;
-let bgFrame = null;
-let preview = document.getElementById("preview");
-let previewCanvas = document.getElementById("previewCanvas");
-let ctxPrev = previewCanvas.getContext("2d");
-let recordFrames = [];
-let detecting = false;
-let processInProgress = false;
+let backgroundImageData = null;
+let positionHistory = [];
+let railAngleDetected = false;
 
-// ----------- Sélection caméra -----------
+/* -------------------------
+   DOM
+------------------------- */
+const preview = document.getElementById("preview");
+const previewCanvas = document.getElementById("previewCanvas");
+previewCanvas.width = 640;
+previewCanvas.height = 480;
+const ctx = previewCanvas.getContext("2d");
+
+const startBtn = document.getElementById("startRecBtn");
+const stopBtn = document.getElementById("stopRecBtn");
+const loadBtn = document.getElementById("loadFileBtn");
+const fileInput = document.getElementById("fileInput");
+const processBtn = document.getElementById("processBtn");
+const slowMoBtn = document.getElementById("slowMoBtn");
+const frameStepMsInput = document.getElementById("frameStepMs");
+const angleInput = document.getElementById("angleInput");
+const recStateP = document.getElementById("recState");
+const blobSizeP = document.getElementById("blobSize");
+const nSamplesSpan = document.getElementById("nSamples");
+const aEstimatedSpan = document.getElementById("aEstimated");
+const aTheorySpan = document.getElementById("aTheory");
+const regEquationP = document.getElementById("regEquation");
+const exportCSVBtn = document.getElementById("exportCSVBtn");
+const captureBgBtn = document.getElementById("captureBgBtn");
+
+/* Charts */
+let velChart = null;
+let fitChart = null;
+let positionChart = null;
+
+/* -------------------------
+   Caméras + choix caméra
+------------------------- */
 async function listCameras() {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const cams = devices.filter(d => d.kind === "videoinput");
-
-    const sel = document.getElementById("cameraSelect");
-    sel.innerHTML = "";
-
-    cams.forEach(cam => {
-        const opt = document.createElement("option");
-        opt.value = cam.deviceId;
-        opt.textContent = cam.label || "Caméra";
-        sel.appendChild(opt);
-    });
-
-    return cams.length > 0;
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices.filter(d => d.kind === "videoinput");
 }
 
 async function startPreview(deviceId = null) {
-    if (videoStream) {
-        videoStream.getTracks().forEach(t => t.stop());
-    }
-
-    const constraints = {
-        video: deviceId ? { deviceId: { exact: deviceId } } : true,
-        audio: false
-    };
-
-    try {
-        videoStream = await navigator.mediaDevices.getUserMedia(constraints);
-        preview.srcObject = videoStream;
-        preview.onloadedmetadata = () => preview.play();
-        return true;
-    } catch (e) {
-        console.error("Erreur caméra :", e);
-        alert("Impossible d'accéder à la caméra.");
-        return false;
-    }
+  try {
+    if (videoStream) videoStream.getTracks().forEach(track => track.stop());
+    let constraints = { video: { width: { ideal: 1280 }, height: { ideal: 720 } } };
+    if (deviceId) constraints.video.deviceId = { exact: deviceId };
+    videoStream = await navigator.mediaDevices.getUserMedia(constraints);
+    preview.srcObject = videoStream;
+    previewLoop();
+    return true;
+  } catch (e) {
+    console.error("Erreur accès caméra :", e);
+    alert("Impossible d'accéder à une caméra. Vérifiez les permissions.");
+    return false;
+  }
 }
 
-document.getElementById("cameraSelect").addEventListener("change", e => {
-    startPreview(e.target.value);
+async function populateCameraSelect() {
+  const cameraSelect = document.getElementById("cameraSelect");
+  const cameras = await listCameras();
+  cameraSelect.innerHTML = "";
+  cameras.forEach((cam, index) => {
+    const option = document.createElement("option");
+    option.value = cam.deviceId;
+    option.textContent = cam.label || `Caméra ${index + 1}`;
+    cameraSelect.appendChild(option);
+  });
+  if (cameras.length > 0) await startPreview(cameras[0].deviceId);
+}
+
+document.getElementById("cameraSelect").addEventListener("change", async (e) => {
+  await startPreview(e.target.value);
 });
 
-// ----------- Prévisualisation -----------
+document.addEventListener("DOMContentLoaded", populateCameraSelect);
 
-function previewLoop() {
-    if (!preview.videoWidth) {
-        requestAnimationFrame(previewLoop);
-        return;
-    }
-
-    previewCanvas.width = preview.videoWidth;
-    previewCanvas.height = preview.videoHeight;
-    ctxPrev.drawImage(preview, 0, 0);
-
-    requestAnimationFrame(previewLoop);
+/* -------------------------
+   Utilities: RGB -> HSV
+------------------------- */
+function rgbToHsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0, v = max, d = max - min;
+  s = max === 0 ? 0 : d / max;
+  if (d !== 0) {
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+  }
+  return { h, s, v };
 }
-previewLoop();
 
-// ----------- Capture du fond -----------
+/* -------------------------
+   Rail detection
+------------------------- */
+function detectRailAngle(imgData) {
+  const data = imgData.data, W = imgData.width, H = imgData.height;
+  let railPixels = [];
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      const lum = (data[i] + data[i + 1] + data[i + 2]) / 3;
+      if (lum < blackThreshold) railPixels.push({ x, y });
+    }
+  }
+  if (railPixels.length < 100) return null;
+  let minY = H, maxY = 0, minXForMinY = 0, minXForMaxY = 0;
+  for (const p of railPixels) {
+    if (p.y < minY) { minY = p.y; minXForMinY = p.x; }
+    if (p.y > maxY) { maxY = p.y; minXForMaxY = p.x; }
+  }
+  const deltaX = minXForMaxY - minXForMinY;
+  const deltaY = maxY - minY;
+  if (deltaY === 0) return null;
+  return Math.atan2(Math.abs(deltaX), Math.abs(deltaY)) * 180 / Math.PI;
+}
 
+/* -------------------------
+   Image preprocessing (gray + blur)
+------------------------- */
+function preprocessImage(imgData) {
+  const data = imgData.data, W = imgData.width, H = imgData.height;
+  const processed = new Uint8ClampedArray(data.length);
+  for (let i = 0; i < data.length; i += 4) {
+    const avg = (data[i] + data[i+1] + data[i+2])/3;
+    processed[i] = processed[i+1] = processed[i+2] = avg;
+    processed[i+3] = data[i+3];
+  }
+  const blurred = new Uint8ClampedArray(processed.length);
+  for (let y=1; y<H-1; y++) for (let x=1; x<W-1; x++) {
+    const i=(y*W+x)*4; let sumR=0,sumG=0,sumB=0;
+    for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
+      const ni = ((y+dy)*W+(x+dx))*4;
+      sumR += processed[ni]; sumG += processed[ni+1]; sumB += processed[ni+2];
+    }
+    blurred[i]=sumR/9; blurred[i+1]=sumG/9; blurred[i+2]=sumB/9; blurred[i+3]=processed[i+3];
+  }
+  return new ImageData(blurred,W,H);
+}
+
+/* -------------------------
+   Capture background
+------------------------- */
 function captureBackground() {
-    ctxPrev.drawImage(preview, 0, 0);
-    bgFrame = ctxPrev.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+  ctx.drawImage(preview, 0, 0, previewCanvas.width, previewCanvas.height);
+  backgroundImageData = preprocessImage(ctx.getImageData(0,0,previewCanvas.width,previewCanvas.height));
+  console.log("Fond capturé et prétraité.");
 }
 
-document.getElementById("captureBgBtn").addEventListener("click", () => {
-    captureBackground();
-    alert("Fond capturé !");
+/* -------------------------
+   Temporal smoothing
+------------------------- */
+function smoothPosition(currentPos) {
+  if (!currentPos) return null;
+  positionHistory.push(currentPos);
+  if(positionHistory.length>historyLength) positionHistory.shift();
+  let sumX=0,sumY=0;
+  for(const pos of positionHistory){sumX+=pos.x;sumY+=pos.y;}
+  return { x:sumX/positionHistory.length, y:sumY/positionHistory.length, count: currentPos.count };
+}
+
+/* -------------------------
+   Motion detection
+------------------------- */
+function detectMotion(currentImageData) {
+  if(!backgroundImageData) return null;
+  const curr = currentImageData.data, bg = backgroundImageData.data;
+  const W=currentImageData.width, H=currentImageData.height;
+  let diffArr=[];
+  for(let i=0;i<curr.length;i+=4) diffArr.push(Math.abs(curr[i]-bg[i]));
+  const mean = diffArr.reduce((a,b)=>a+b,0)/diffArr.length;
+  const std = Math.sqrt(diffArr.reduce((sq,n)=>sq+Math.pow(n-mean,2),0)/diffArr.length);
+  const thresh = mean + 2*std;
+
+  let sumX=0,sumY=0,count=0;
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    const i=(y*W+x)*4; if(Math.abs(curr[i]-bg[i])>thresh){sumX+=x;sumY+=y;count++;}
+  }
+  if(count<MIN_PIXELS_FOR_DETECT) return null;
+  return { x: sumX/count, y: sumY/count, count };
+}
+
+/* -------------------------
+   Calibration px -> m
+------------------------- */
+function estimatePxToMeter(imgData){
+  if(!backgroundImageData) return null;
+  const processed=preprocessImage(imgData);
+  const curr=processed.data, bg=backgroundImageData.data;
+  const W=processed.width,H=processed.height;
+  let found=[];
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    const i=(y*W+x)*4;
+    if(Math.abs(curr[i]-bg[i])>10) found.push({x,y});
+  }
+  if(found.length<200) return null;
+  let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+  for(const p of found){ if(p.x<minX) minX=p.x; if(p.x>maxX) maxX=p.x; if(p.y<minY) minY=p.y; if(p.y>maxY) maxY=p.y;}
+  const diamPx=Math.max(maxX-minX,maxY-minY);
+  if(diamPx<=2) return null;
+  return REAL_DIAM_M/diamPx;
+}
+
+/* -------------------------
+   Kalman 2D
+------------------------- */
+function createKalman(){
+  let x=[[0],[0],[0],[0]],P=identity(4,1e3);
+  const Q=[[1e-5,0,0,0],[0,1e-3,0,0],[0,0,1e-5,0],[0,0,0,1e-3]],H=[[1,0,0,0],[0,0,1,0]],R=[[1e-6,0],[0,1e-6]];
+  function predict(dt){ const F=[[1,dt,0,0],[0,1,0,0],[0,0,1,dt],[0,0,0,1]]; x=matMul(F,x); P=add(matMul(matMul(F,P),transpose(F)),Q);}
+  function update(z){ const y=sub(z,matMul(H,x)); const S=add(matMul(matMul(H,P),transpose(H)),R); const K=matMul(matMul(P,transpose(H)),inv2x2(S)); x=add(x,matMul(K,y)); P=matMul(sub(identity(4),matMul(K,H)),P);}
+  function setFromMeasurement(z){x=[[z[0][0]],[0],[z[1][0]],[0]]; P=identity(4,1e-1);}
+  function getState(){return {x:x[0][0],vx:x[1][0],y:x[2][0],vy:x[3][0]};}
+  return {predict,update,getState,setFromMeasurement};
+}
+
+/* -------------------------
+   Matrix helpers
+------------------------- */
+function identity(n,scale=1){return Array.from({length:n},(_,i)=>Array.from({length:n},(_,j)=>(i===j?scale:0)));}
+function transpose(A){return A[0].map((_,c)=>A.map(r=>r[c]));}
+function matMul(A,B){const aR=A.length,aC=A[0].length,bC=B[0].length,C=Array.from({length:aR},()=>Array.from({length:bC},()=>0));for(let i=0;i<aR;i++) for(let k=0;k<aC;k++) for(let j=0;j<bC;j++) C[i][j]+=A[i][k]*B[k][j];return C;}
+function add(A,B){return A.map((row,i)=>row.map((v,j)=>v+B[i][j]));}
+function sub(A,B){return A.map((row,i)=>row.map((v,j)=>v-B[i][j]));}
+function inv2x2(M){const [a,b,c,d]=[M[0][0],M[0][1],M[1][0],M[1][1]],det=a*d-b*c; if(Math.abs(det)<1e-12) return [[1e12,0],[0,1e12]]; return [[d/det,-b/det],[-c/det,a/det]];}
+
+/* -------------------------
+   Preview loop
+------------------------- */
+function previewLoop(){
+  if(preview.readyState>=2){
+    ctx.drawImage(preview,0,0,previewCanvas.width,previewCanvas.height);
+    const img=ctx.getImageData(0,0,previewCanvas.width,previewCanvas.height);
+    const processed=preprocessImage(img);
+    if(backgroundImageData){
+      const pos=detectMotion(processed);
+      if(pos){
+        const smoothed=smoothPosition(pos);
+        if(smoothed){
+          ctx.beginPath();
+          ctx.strokeStyle="lime";
+          ctx.lineWidth=3;
+          ctx.arc(smoothed.x,smoothed.y,12,0,Math.PI*2);
+          ctx.stroke();
+        }
+      }
+    }
+  }
+  requestAnimationFrame(previewLoop);
+}
+
+/* -------------------------
+   Event listeners: capture background
+------------------------- */
+captureBgBtn.addEventListener("click", captureBackground);
+
+/* -------------------------
+   Event listeners: recording
+   (start/stop)
+------------------------- */
+startBtn.addEventListener("click", async()=>{
+  if(!videoStream){await populateCameraSelect();}
+  recordedChunks=[]; try{mediaRecorder=new MediaRecorder(videoStream,{mimeType:"video/webm;codecs=vp9"});}catch(e){mediaRecorder=new MediaRecorder(videoStream);}
+  mediaRecorder.ondataavailable=e=>{if(e.data && e.data.size) recordedChunks.push(e.data);};
+  mediaRecorder.onstop=()=>{
+    recordedBlob=new Blob(recordedChunks,{type:"video/webm"});
+    videoURL=URL.createObjectURL(recordedBlob);
+    processBtn.disabled=false;
+    slowMoBtn.disabled=false;
+    blobSizeP.textContent=`Vidéo enregistrée (${(recordedBlob.size/1024/1024).toFixed(2)} MB)`;
+  };
+  mediaRecorder.start();
+  recStateP.textContent="État : enregistrement...";
+  startBtn.disabled=true;
+  stopBtn.disabled=false;
 });
 
-// ----------- Enregistrement vidéo -----------
+stopBtn.addEventListener("click",()=>{if(mediaRecorder && mediaRecorder.state!=="inactive"){mediaRecorder.stop(); recStateP.textContent="État : arrêté"; startBtn.disabled=false; stopBtn.disabled=true;}});
 
-document.getElementById("startRecBtn").addEventListener("click", () => {
-    recordFrames = [];
-    detecting = true;
-    document.getElementById("stopRecBtn").disabled = false;
-    document.getElementById("startRecBtn").disabled = true;
-    document.getElementById("recState").textContent = "État : enregistrement…";
+/* -------------------------
+   Import CSV
+------------------------- */
+document.getElementById("csvInput").addEventListener("change",function(e){
+  const file=e.target.files[0];
+  if(!file) return;
+  const reader=new FileReader();
+  reader.onload=function(ev){
+    const lines=ev.target.result.split("\n").filter(l=>l.trim()!=="");
+    const data=lines.map(line=>{const parts=line.includes(";")?line.split(";"):line.split(","); return {t:parseFloat(parts[0]), v:parseFloat(parts[1])};});
+    nSamplesSpan.textContent=data.length;
+    const tValues=data.map(d=>d.t), vValues=data.map(d=>d.v);
+    if(window.velChartInstance) window.velChartInstance.destroy();
+    const ctxVel=document.getElementById("velChart").getContext("2d");
+    window.velChartInstance=new Chart(ctxVel,{type:"line",data:{labels:tValues,datasets:[{label:"Vitesse mesurée (m/s)",data:vValues}]}});
 
-    grabFrameLoop();
-});
+    // Regression linéaire
+    const n=tValues.length;
+    let sumT=0,sumV=0,sumTV=0,sumTT=0;
+    for(let i=0;i<n;i++){sumT+=tValues[i]; sumV+=vValues[i]; sumTV+=tValues[i]*vValues[i]; sumTT+=tValues[i]*tValues[i];}
+    const slope=(n*sumTV-sumT*sumV)/(n*sumTT-sumT*sumT);
+    aEstimatedSpan.textContent=slope.toFixed(3);
+    const fitValues=tValues.map(t=>slope*t);
+    if(window.fitChartInstance) window.fitChartInstance.destroy();
+    const ctxFit=document.getElementById("fitChart").getContext("2d");
+    window.fitChartInstance=new Chart(ctxFit,{type:"line",data:{labels:tValues,datasets:[{label:"Vitesse mesurée",data:vValues},{label:"Modèle v = a·t",data:fitValues}]}});
 
-document.getElementById("stopRecBtn").addEventListener("click", () => {
-    detecting = false;
-    document.getElementById("stopRecBtn").disabled = true;
-    document.getElementById("startRecBtn").disabled = false;
-    document.getElementById("processBtn").disabled = false;
-    document.getElementById("recState").textContent =
-        `État : ${recordFrames.length} images enregistrées`;
-});
-
-function grabFrameLoop() {
-    if (!detecting) return;
-
-    ctxPrev.drawImage(preview, 0, 0);
-    const frame = ctxPrev.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
-    recordFrames.push(frame);
-
-    requestAnimationFrame(grabFrameLoop);
-}
-
-// ----------- Import vidéo -----------
-
-document.getElementById("loadFileBtn").addEventListener("click", () => {
-    document.getElementById("fileInput").click();
-});
-document.getElementById("fileInput").addEventListener("change", loadVideoFile);
-
-function loadVideoFile(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-
-    const url = URL.createObjectURL(file);
-    const tempVideo = document.createElement("video");
-    tempVideo.src = url;
-    tempVideo.muted = true;
-    tempVideo.play();
-
-    recordFrames = [];
-    tempVideo.addEventListener("loadeddata", () => {
-        const canvas = document.createElement("canvas");
-        const ctx = canvas.getContext("2d");
-        canvas.width = tempVideo.videoWidth;
-        canvas.height = tempVideo.videoHeight;
-
-        let t = 0;
-        function extract() {
-            if (t > tempVideo.duration) {
-                document.getElementById("processBtn").disabled = false;
-                document.getElementById("recState").textContent =
-                    `Imported : ${recordFrames.length} frames`;
-                return;
-            }
-            tempVideo.currentTime = t;
-            ctx.drawImage(tempVideo, 0, 0);
-            recordFrames.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
-            t += 0.01;
-            setTimeout(extract, 20);
-        }
-        extract();
-    });
-}
-
-// ----------- Détection mouvement -----------
-
-function detectMotion(frame) {
-    if (!bgFrame) return [];
-
-    const w = frame.width, h = frame.height;
-    const diff = [];
-
-    const fD = frame.data;
-    const bD = bgFrame.data;
-
-    for (let i = 0; i < fD.length; i += 4) {
-        const dr = Math.abs(fD[i] - bD[i]);
-        const dg = Math.abs(fD[i + 1] - bD[i + 1]);
-        const db = Math.abs(fD[i + 2] - bD[i + 2]);
-        const d = (dr + dg + db) / 3;
-        diff.push(d);
-    }
-
-    const mean = diff.reduce((a, b) => a + b, 0) / diff.length;
-    let sumSq = 0;
-    diff.forEach(v => (sumSq += (v - mean) ** 2));
-    const std = Math.sqrt(sumSq / diff.length);
-
-    const thresh = mean + 2 * std;
-    const points = [];
-
-    for (let i = 0; i < diff.length; i++) {
-        if (diff[i] > thresh) {
-            const y = Math.floor(i / w);
-            const x = i % w;
-            points.push([x, y]);
-        }
-    }
-    return points;
-}
-
-// ----------- Kalman simple 2D -----------
-
-class Kalman2D {
-    constructor() {
-        this.x = 0;
-        this.y = 0;
-        this.vx = 0;
-        this.vy = 0;
-        this.P = 1;
-    }
-    update(mx, my) {
-        const K = this.P / (this.P + 0.1);
-        this.x += K * (mx - this.x);
-        this.y += K * (my - this.y);
-        this.vx = mx - this.x;
-        this.vy = my - this.y;
-        this.P = (1 - K) * this.P + 0.01;
-    }
-}
-
-// ----------- PROCESS -----------
-
-document.getElementById("processBtn").addEventListener("click", processVideo);
-
-async function processVideo() {
-    if (processInProgress) return;
-    processInProgress = true;
-
-    const dt = parseFloat(document.getElementById("frameStepMs").value) / 1000;
-    const angleDeg = parseFloat(document.getElementById("angleInput").value);
-    const angle = angleDeg * Math.PI / 180;
-
-    const kalman = new Kalman2D();
-    const samples = [];
-
-    for (let i = 0; i < recordFrames.length; i++) {
-        const pts = detectMotion(recordFrames[i]);
-        if (!pts.length) continue;
-
-        const mx = pts.reduce((s, p) => s + p[0], 0) / pts.length;
-        const my = pts.reduce((s, p) => s + p[1], 0) / pts.length;
-
-        kalman.update(mx, my);
-
-        samples.push({
-            t: i * dt,
-            x: kalman.x,
-            y: kalman.y
-        });
-    }
-
-    const samplesFilt = samples.filter((s, i) => i % 3 === 0);
-
-    // Vitesse
-    samplesFilt.forEach((s, i) => {
-        if (i === 0) {
-            s.vx = 0;
-            s.vy = 0;
-        } else {
-            s.vx = (samplesFilt[i].x - samplesFilt[i - 1].x) / dt;
-            s.vy = (samplesFilt[i].y - samplesFilt[i - 1].y) / dt;
-        }
-    });
-
-    // Régression vx vs t
-    const times = samplesFilt.map(s => s.t);
-    const vxs   = samplesFilt.map(s => s.vx);
-
-    const fit = linearRegression(times, vxs);
-    const aEst = fit.slope;
-
-    document.getElementById("aEstimated").textContent = aEst.toFixed(4);
-    document.getElementById("aTheory").textContent =
-        (9.81 * Math.sin(angle)).toFixed(4);
-
-    buildCharts(times, vxs, fit);
-    buildPositionChart(samplesFilt);
-
-    document.getElementById("nSamples").textContent = samplesFilt.length;
-
-    processInProgress = false;
-}
-
-// ----------- Régression linéaire -----------
-
-function linearRegression(t, v) {
-    const n = t.length;
-    const sumT = t.reduce((a, b) => a + b, 0);
-    const sumV = v.reduce((a, b) => a + b, 0);
-    const sumTV = t.reduce((a, b, i) => a + b * v[i], 0);
-    const sumTT = t.reduce((a, b) => a + b * b, 0);
-
-    const slope = (n * sumTV - sumT * sumV) / (n * sumTT - sumT ** 2);
-    const intercept = (sumV - slope * sumT) / n;
-
-    return { slope, intercept };
-}
-
-// ----------- AFFICHAGE CHARTS -----------
-
-let velChartObj = null;
-let fitChartObj = null;
-let doc3ChartObj = null;
-
-function buildCharts(times, velocities, fit) {
-    const ctxVel = document.getElementById("velChart").getContext("2d");
-    if (velChartObj) velChartObj.destroy();
-
-    velChartObj = new Chart(ctxVel, {
-        type: "line",
-        data: {
-            labels: times,
-            datasets: [
-                {
-                    label: "Vitesse (m/s)",
-                    data: velocities,
-                    borderWidth: 2,
-                    fill: false
-                }
-            ]
-        }
-    });
-
-    const ctxFit = document.getElementById("fitChart").getContext("2d");
-    if (fitChartObj) fitChartObj.destroy();
-
-    fitChartObj = new Chart(ctxFit, {
-        type: "line",
-        data: {
-            labels: times,
-            datasets: [
-                {
-                    label: "Données",
-                    data: velocities,
-                    borderWidth: 2,
-                    fill: false
-                },
-                {
-                    label: "v = a·t",
-                    data: times.map(t => fit.slope * t + fit.intercept),
-                    borderDash: [5, 5],
-                    borderWidth: 2,
-                    fill: false
-                }
-            ]
-        }
-    });
-
-    document.getElementById("regEquation").textContent =
-        `v = ${fit.slope.toFixed(4)}·t + ${fit.intercept.toFixed(4)}`;
-}
-
-function buildPositionChart(samples) {
-    const ctxDoc3 = document.getElementById("doc3Chart").getContext("2d");
-    if (doc3ChartObj) doc3ChartObj.destroy();
-
-    doc3ChartObj = new Chart(ctxDoc3, {
-        type: "line",
-        data: {
-            labels: samples.map(s => s.t),
-            datasets: [
-                {
-                    label: "Position X (px)",
-                    data: samples.map(s => s.x),
-                    borderWidth: 2,
-                    fill: false
-                }
-            ]
-        }
-    });
-}
-
-// ----------- IMPORT CSV -----------
-
-document.getElementById("csvInput").addEventListener("change", e => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = evt => {
-        const lines = evt.target.result.split("\n").map(l => l.trim());
-        const rows = lines.slice(1).map(l => l.split(","));
-
-        const t = rows.map(r => parseFloat(r[0]));
-        const vx = rows.map(r => parseFloat(r[3]));
-
-        const fit = linearRegression(t, vx);
-        buildCharts(t, vx, fit);
-
-        document.getElementById("aEstimated").textContent =
-            fit.slope.toFixed(4);
-    };
-    reader.readAsText(file);
+  };
+  reader.readAsText(file);
 });
