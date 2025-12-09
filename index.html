@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>exAO — Mouvement balle</title>
+  <title>exAO v02 — Mouvement balle</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
@@ -80,15 +80,22 @@
 </head>
 <body>
 <header>
-  <h1>exAO – Analyse du mouvement d’une balle</h1>
+  <h1>exAO v02 – Analyse du mouvement d’une balle</h1>
 </header>
 <main>
   <!-- ----------- Prévisualisation + caméra ----------- -->
   <section id="recorder">
-    <div class="camRow">
-      <video id="preview" autoplay playsinline muted></video>
-      <canvas id="previewCanvas"></canvas>
-    </div>
+
+  <div>
+    <label for="cameraSelect">Choix de la caméra :</label>
+    <select id="cameraSelect"></select>
+  </div>
+
+  <div class="camRow">
+    <video id="preview" autoplay playsinline muted></video>
+    <canvas id="previewCanvas"></canvas>
+  </div>
+
     <div id="rampAngleDisplay">Angle de la rampe: --°</div>
     <div class="controls">
       <button id="captureBgBtn">Capturer le fond</button>
