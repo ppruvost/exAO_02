@@ -6,8 +6,8 @@
   <title>exAO v02 — Mouvement balle</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
   <style>
-    /* Ajout de styles de base pour une meilleure présentation */
     body {
       font-family: Arial, sans-serif;
       line-height: 1.6;
@@ -15,12 +15,8 @@
       padding: 20px;
       color: #333;
     }
-    header {
-      margin-bottom: 20px;
-    }
-    section {
-      margin-bottom: 30px;
-    }
+    header { margin-bottom: 20px; }
+    section { margin-bottom: 30px; }
     .camRow {
       display: flex;
       gap: 20px;
@@ -48,16 +44,10 @@
       background-color: #cccccc;
       cursor: not-allowed;
     }
-    .meta {
-      margin-bottom: 15px;
-    }
-    .meta label {
-      margin-right: 15px;
-    }
-    .meta input {
-      padding: 5px;
-      width: 60px;
-    }
+    .meta { margin-bottom: 15px; }
+    .meta label { margin-right: 15px; }
+    .meta input { padding: 5px; width: 60px; }
+
     #rampAngleDisplay {
       font-weight: bold;
       font-size: 1.2em;
@@ -67,36 +57,40 @@
       border-radius: 4px;
       display: inline-block;
     }
+
     canvas {
       width: 100%;
       max-width: 800px;
       height: auto;
       margin-bottom: 20px;
     }
-    hr {
-      margin: 30px 0;
-    }
+
+    hr { margin: 30px 0; }
   </style>
 </head>
+
 <body>
 <header>
   <h1>exAO v02 – Analyse du mouvement d’une balle</h1>
 </header>
+
 <main>
-  <!-- ----------- Prévisualisation + caméra ----------- -->
+
+  <!-- ----------- Caméra et capture ----------- -->
   <section id="recorder">
 
-  <div>
-    <label for="cameraSelect">Choix de la caméra :</label>
-    <select id="cameraSelect"></select>
-  </div>
+    <div>
+      <label for="cameraSelect">Choix de la caméra :</label>
+      <select id="cameraSelect"></select>
+    </div>
 
-  <div class="camRow">
-    <video id="preview" autoplay playsinline muted></video>
-    <canvas id="previewCanvas"></canvas>
-  </div>
+    <div class="camRow">
+      <video id="preview" autoplay playsinline muted></video>
+      <canvas id="previewCanvas"></canvas>
+    </div>
 
     <div id="rampAngleDisplay">Angle de la rampe: --°</div>
+
     <div class="controls">
       <button id="captureBgBtn">Capturer le fond</button>
       <button id="startRecBtn">Démarrer enregistrement</button>
@@ -105,49 +99,55 @@
       <input id="fileInput" type="file" accept="video/*" style="display:none"/>
       <button id="slowMoBtn" disabled>Ralenti ×0.25</button>
     </div>
+
     <div class="meta">
       <label>Angle α (°) :
         <input id="angleInput" type="number" step="0.1" value="15">
       </label>
+
       <label>Pas d'analyse (ms) :
         <input id="frameStepMs" type="number" value="10">
       </label>
     </div>
+
     <p id="recState">État : inactif</p>
     <p id="pxToMeterDisplay"></p>
+
     <button id="processBtn" disabled>Traiter la vidéo enregistrée</button>
+
   </section>
+
   <hr>
- <!-- ----------- import CVS ----------- -->
-<section id="import">
-  <h2>Importer un fichier CSV</h2>
-  <div class="controls">
-    <label for="csvInput">Importer un fichier CSV :</label>
-    <input type="file" id="csvInput" accept=".csv">
-  </div>
-</section>
-  
+
+  <!-- ----------- Import CSV ----------- -->
+  <section id="import">
+    <h2>Importer un fichier CSV</h2>
+
+    <div class="controls">
+      <label for="csvFile">Sélectionner un fichier CSV :</label>
+      <input type="file" id="csvFile" accept=".csv">
+    </div>
+  </section>
+
+
   <!-- ----------- Résultats ----------- -->
   <section id="results">
-    <h2>Données & Graphiques</h2>
+    <h2>Résultats & Graphiques</h2>
+
     <p>Échantillons : <span id="nSamples">0</span></p>
-    <p>a estimée : <span id="aEstimated">—</span> m/s²</p>
-    <p>a théorique : <span id="aTheory">—</span> m/s²</p>
-    <p id="blobSize"></p>
+    <p>a estimée : <span id="accelEst">—</span></p>
+    <p>a théorique : <span id="accelTheo">—</span></p>
+    <p>Angle mesuré : <span id="angleValue">—</span></p>
 
-    <h3>Vitesse</h3>
-    <canvas id="velChart"></canvas>
-
-    <h3>v = a·t (modèle informatique)</h3>
-    <p id="regEquation">—</p>
+    <h3>v = f(t) — Vitesse mesurée</h3>
     <canvas id="fitChart"></canvas>
-    
-    <h3>Mouvement Rectiligne Uniformément Varié (modèle informatique)</h3>
-    <canvas id="doc3Chart"></canvas>
 
     <button id="exportCSVBtn">Exporter CSV</button>
   </section>
+
 </main>
+
 <script src="script.js"></script>
+
 </body>
 </html>
