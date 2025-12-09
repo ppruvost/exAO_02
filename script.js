@@ -236,9 +236,9 @@ function estimatePxToMeter(imgData){
 function createKalman(){
   let x=[[0],[0],[0],[0]],P=identity(4,1e3);
   const Q=[[1e-5,0,0,0],[0,1e-3,0,0],[0,0,1e-5,0],[0,0,0,1e-3]],H=[[1,0,0,0],[0,0,1,0]],R=[[1e-6,0],[0,1e-6]];
-  function predict(dt){ const F=[[1,dt,0,0],[0,1,0,0],[0,0,1,dt],[0,0,0,1]]; x=matMul(F,x); P=add(matMul(matMul(F,P),transpose(F)),Q);}
-  function update(z){ const y=sub(z,matMul(H,x)); const S=add(matMul(matMul(H,P),transpose(H)),R); const K=matMul(matMul(P,transpose(H)),inv2x2(S)); x=add(x,matMul(K,y)); P=matMul(sub(identity(4),matMul(K,H)),P);}
-  function setFromMeasurement(z){x=[[z[0][0]],[0],[z[1][0]],[0]]; P=identity(4,1e-1);}
+  function predict(dt){ const F=[[1,dt,0,0],[0,1,0,0],[0,0,1,dt],[0,0,0,1]]; x=matMul(F,x); P=add(matMul(matMul(F,P),transpose(F)),Q); }
+  function update(z){ const y=sub(z,matMul(H,x)); const S=add(matMul(matMul(H,P),transpose(H)),R); const K=matMul(matMul(P,transpose(H)),inv2x2(S)); x=add(x,matMul(K,y)); P=matMul(sub(identity(4),matMul(K,H)),P); }
+  function setFromMeasurement(z){x=[[z[0][0]],[0],[z[1][0]],[0]]; P=identity(4,1e-1); }
   function getState(){return {x:x[0][0],vx:x[1][0],y:x[2][0],vy:x[3][0]};}
   return {predict,update,getState,setFromMeasurement};
 }
@@ -246,12 +246,12 @@ function createKalman(){
 /* -------------------------
    Matrix helpers
 ------------------------- */
-function identity(n,scale=1){return Array.from({length:n},(_,i)=>Array.from({length:n},(_,j)=>(i===j?scale:0)));}
-function transpose(A){return A[0].map((_,c)=>A.map(r=>r[c]));}
-function matMul(A,B){const aR=A.length,aC=A[0].length,bC=B[0].length,C=Array.from({length:aR},()=>Array.from({length:bC},()=>0));for(let i=0;i<aR;i++) for(let k=0;k<aC;k++) for(let j=0;j<bC;j++) C[i][j]+=A[i][k]*B[k][j];return C;}
-function add(A,B){return A.map((row,i)=>row.map((v,j)=>v+B[i][j]));}
-function sub(A,B){return A.map((row,i)=>row.map((v,j)=>v-B[i][j]));}
-function inv2x2(M){const [a,b,c,d]=[M[0][0],M[0][1],M[1][0],M[1][1]],det=a*d-b*c; if(Math.abs(det)<1e-12) return [[1e12,0],[0,1e12]]; return [[d/det,-b/det],[-c/det,a/det]];}
+function identity(n,scale=1){return Array.from({length:n},(_,i)=>Array.from({length:n},(_,j)=>(i===j?scale:0))); }
+function transpose(A){return A[0].map((_,c)=>A.map(r=>r[c])); }
+function matMul(A,B){const aR=A.length,aC=A[0].length,bC=B[0].length,C=Array.from({length:aR},()=>Array.from({length:bC},()=>0));for(let i=0;i<aR;i++) for(let k=0;k<aC;k++) for(let j=0;j<bC;j++) C[i][j]+=A[i][k]*B[k][j];return C; }
+function add(A,B){return A.map((row,i)=>row.map((v,j)=>v+B[i][j])); }
+function sub(A,B){return A.map((row,i)=>row.map((v,j)=>v-B[i][j])); }
+function inv2x2(M){const [a,b,c,d]=[M[0][0],M[0][1],M[1][0],M[1][1]],det=a*d-b*c; if(Math.abs(det)<1e-12) return [[1e12,0],[0,1e12]]; return [[d/det,-b/det],[-c/det,a/det]]; }
 
 /* -------------------------
    Preview loop
@@ -307,32 +307,210 @@ startBtn.addEventListener("click", async()=>{
 stopBtn.addEventListener("click",()=>{if(mediaRecorder && mediaRecorder.state!=="inactive"){mediaRecorder.stop(); recStateP.textContent="État : arrêté"; startBtn.disabled=false; stopBtn.disabled=true;}});
 
 /* -------------------------
-   Import CSV
+   Helper: determine angle (deg)
+   - prefer angleInput if set
+   - else try rail detection on current background image
+------------------------- */
+function getAngleDegFallback() {
+  // 1) from input
+  const v = parseFloat(angleInput.value);
+  if (!isNaN(v) && isFinite(v)) return v;
+  // 2) from detected rail (if background exists)
+  if (backgroundImageData) {
+    try {
+      const detected = detectRailAngle(backgroundImageData);
+      if (detected !== null) return detected;
+    } catch (e) {
+      console.warn("detectRailAngle failed:", e);
+    }
+  }
+  // default 0
+  return 0;
+}
+
+/* -------------------------
+   Compute theoretical acceleration g*sin(theta)
+------------------------- */
+function computeTheoreticalAcceleration(thetaDeg) {
+  const g = 9.81;
+  const theta = thetaDeg * Math.PI / 180;
+  return g * Math.sin(theta);
+}
+
+/* -------------------------
+   Compute acceleration from samples t,x,y
+   - samples: [{t, x, y}, ...] with x,y in meters
+   - returns object {a, intercept, n}
+------------------------- */
+function computeAccelerationFromTxY(samples) {
+  if (!samples || samples.length < 3) return null;
+  // compute speed magnitude between consecutive points
+  const vSamples = [];
+  for (let i=1;i<samples.length;i++){
+    const dt = samples[i].t - samples[i-1].t;
+    if (dt <= 0) continue;
+    const dx = samples[i].x - samples[i-1].x;
+    const dy = samples[i].y - samples[i-1].y;
+    const dist = Math.sqrt(dx*dx + dy*dy); // meters
+    const v = dist / dt;
+    vSamples.push({ t: samples[i].t, v });
+  }
+  if (vSamples.length < 2) return null;
+  // linear regression v = a * t + b
+  const n = vSamples.length;
+  let sumT=0,sumV=0,sumTV=0,sumTT=0;
+  for (let i=0;i<n;i++){ const ti=vSamples[i].t, vi=vSamples[i].v; sumT+=ti; sumV+=vi; sumTV+=ti*vi; sumTT+=ti*ti; }
+  const denom = n*sumTT - sumT*sumT;
+  if (Math.abs(denom) < 1e-12) return null;
+  const a = (n*sumTV - sumT*sumV) / denom;
+  const b = (sumV - a*sumT) / n;
+  return { a, intercept: b, n };
+}
+
+/* -------------------------
+   Compute acceleration from samples t,v
+   - samples: [{t, v}, ...]
+------------------------- */
+function computeAccelerationFromTV(samples) {
+  if (!samples || samples.length < 2) return null;
+  const n = samples.length;
+  let sumT=0,sumV=0,sumTV=0,sumTT=0;
+  for (let i=0;i<n;i++){ const ti=samples[i].t, vi=samples[i].v; sumT+=ti; sumV+=vi; sumTV+=ti*vi; sumTT+=ti*ti; }
+  const denom = n*sumTT - sumT*sumT;
+  if (Math.abs(denom) < 1e-12) return null;
+  const a = (n*sumTV - sumT*sumV) / denom;
+  const b = (sumV - a*sumT) / n;
+  return { a, intercept: b, n };
+}
+
+/* -------------------------
+   Import CSV (amélioré)
+   - support t,v  (2 colonnes)
+   - support t,x,y (3 colonnes) with x,y en mètres
 ------------------------- */
 document.getElementById("csvInput").addEventListener("change",function(e){
-  const file=e.target.files[0];
+  const file = e.target.files[0];
   if(!file) return;
-  const reader=new FileReader();
-  reader.onload=function(ev){
-    const lines=ev.target.result.split("\n").filter(l=>l.trim()!=="");
-    const data=lines.map(line=>{const parts=line.includes(";")?line.split(";"):line.split(","); return {t:parseFloat(parts[0]), v:parseFloat(parts[1])};});
-    nSamplesSpan.textContent=data.length;
-    const tValues=data.map(d=>d.t), vValues=data.map(d=>d.v);
-    if(window.velChartInstance) window.velChartInstance.destroy();
-    const ctxVel=document.getElementById("velChart").getContext("2d");
-    window.velChartInstance=new Chart(ctxVel,{type:"line",data:{labels:tValues,datasets:[{label:"Vitesse mesurée (m/s)",data:vValues}]}});
+  const reader = new FileReader();
+  reader.onload = function(ev){
+    const raw = ev.target.result.replace(/\r/g,"");
+    const lines = raw.split("\n").map(l=>l.trim()).filter(l=>l!=="" && !l.startsWith("#"));
+    if (lines.length === 0) {
+      alert("CSV vide ou invalide.");
+      return;
+    }
 
-    // Regression linéaire
-    const n=tValues.length;
-    let sumT=0,sumV=0,sumTV=0,sumTT=0;
-    for(let i=0;i<n;i++){sumT+=tValues[i]; sumV+=vValues[i]; sumTV+=tValues[i]*vValues[i]; sumTT+=tValues[i]*tValues[i];}
-    const slope=(n*sumTV-sumT*sumV)/(n*sumTT-sumT*sumT);
-    aEstimatedSpan.textContent=slope.toFixed(3);
-    const fitValues=tValues.map(t=>slope*t);
-    if(window.fitChartInstance) window.fitChartInstance.destroy();
-    const ctxFit=document.getElementById("fitChart").getContext("2d");
-    window.fitChartInstance=new Chart(ctxFit,{type:"line",data:{labels:tValues,datasets:[{label:"Vitesse mesurée",data:vValues},{label:"Modèle v = a·t",data:fitValues}]}});
+    // Attempt to parse flexible columns (separator ; or ,)
+    const parsed = lines.map(line => {
+      const sep = line.includes(";") ? ";" : ",";
+      const parts = line.split(sep).map(p=>p.trim());
+      return parts;
+    });
 
+    // Determine format: 2 cols => t,v ; 3 cols => t,x,y
+    const first = parsed[0];
+    if (first.length < 2) { alert("Format CSV non reconnu (au moins 2 colonnes attendues)."); return; }
+
+    let tvSamples = [];
+    let txySamples = [];
+    let detectedFormat = null;
+
+    for (const parts of parsed) {
+      if (parts.length >= 3) {
+        const t = parseFloat(parts[0]);
+        const x = parseFloat(parts[1]);
+        const y = parseFloat(parts[2]);
+        if (!isNaN(t) && !isNaN(x) && !isNaN(y)) {
+          txySamples.push({ t, x, y });
+          detectedFormat = 'txy';
+          continue;
+        }
+      }
+      // fallback to 2-col parse
+      if (parts.length >= 2) {
+        const t = parseFloat(parts[0]);
+        const v = parseFloat(parts[1]);
+        if (!isNaN(t) && !isNaN(v)) {
+          tvSamples.push({ t, v });
+          if (detectedFormat === null) detectedFormat = 'tv';
+          continue;
+        }
+      }
+      // else skip line
+    }
+
+    nSamplesSpan.textContent = (detectedFormat === 'txy') ? txySamples.length : tvSamples.length;
+
+    // If txy present prefer that
+    let regResult = null;
+    let tValues = [], vValues = [];
+
+    if (detectedFormat === 'txy' && txySamples.length >= 2) {
+      // compute velocities and regression
+      const accRes = computeAccelerationFromTxY(txySamples);
+      if (accRes) {
+        regResult = accRes;
+        // create arrays for plotting: we need t and v for each v-sample (derivative points)
+        // recreate vSamples used in computeAccelerationFromTxY
+        const vSamples = [];
+        for (let i=1;i<txySamples.length;i++){
+          const dt = txySamples[i].t - txySamples[i-1].t;
+          if (dt <= 0) continue;
+          const dx = txySamples[i].x - txySamples[i-1].x;
+          const dy = txySamples[i].y - txySamples[i-1].y;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          const v = dist / dt;
+          vSamples.push({ t: txySamples[i].t, v });
+        }
+        tValues = vSamples.map(s=>s.t);
+        vValues = vSamples.map(s=>s.v);
+      }
+    } else if (detectedFormat === 'tv' && tvSamples.length >= 2) {
+      const accRes = computeAccelerationFromTV(tvSamples);
+      if (accRes) {
+        regResult = accRes;
+        tValues = tvSamples.map(s=>s.t);
+        vValues = tvSamples.map(s=>s.v);
+      }
+    } else {
+      alert("CSV non exploitable : trop peu de points ou format non pris en charge.");
+      return;
+    }
+
+    // Draw velocity chart (existing behavior)
+    if (window.velChartInstance) window.velChartInstance.destroy();
+    const ctxVel = document.getElementById("velChart").getContext("2d");
+    window.velChartInstance = new Chart(ctxVel,{type:"line",data:{labels:tValues,datasets:[{label:"Vitesse mesurée (m/s)",data:vValues}]}});
+
+    // Fill regression results into DOM
+    if (regResult) {
+      aEstimatedSpan.textContent = regResult.a.toFixed(3);
+      // theoretical acceleration from angle
+      const thetaDeg = getAngleDegFallback();
+      const aTheo = computeTheoreticalAcceleration(thetaDeg);
+      aTheorySpan.textContent = aTheo.toFixed(3);
+      // regression equation
+      regEquationP.textContent = `Régression: v = ${regResult.a.toFixed(4)}·t + ${regResult.intercept.toFixed(4)}  (n=${regResult.n})`;
+
+      // plot fit line v = a·t + b
+      const fitValues = tValues.map(t => regResult.a * t + regResult.intercept);
+      if (window.fitChartInstance) window.fitChartInstance.destroy();
+      const ctxFit = document.getElementById("fitChart").getContext("2d");
+      window.fitChartInstance = new Chart(ctxFit,{
+        type:"line",
+        data:{
+          labels:tValues,
+          datasets:[
+            { label:"Vitesse mesurée", data:vValues, fill:false },
+            { label:`Modèle v = a·t + b`, data:fitValues, fill:false }
+          ]
+        }
+      });
+    } else {
+      aEstimatedSpan.textContent = "—";
+      aTheorySpan.textContent = getAngleDegFallback() ? computeTheoreticalAcceleration(getAngleDegFallback()).toFixed(3) : "—";
+      regEquationP.textContent = "Régression impossible (données insuffisantes).";
+    }
   };
   reader.readAsText(file);
 });
