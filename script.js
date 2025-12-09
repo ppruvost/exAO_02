@@ -419,17 +419,56 @@ function inv2x2(M) {
 /* -------------------------
    Camera preview + overlay (real-time)
    ------------------------- */
+async function listCameras() {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices.filter(d => d.kind === "videoinput");
+}
+
+
 async function startPreview() {
   try {
+    const cams = await listCameras();
+    if (cams.length === 0) {
+      alert("Aucune caméra détectée.");
+      return false;
+    }
+
+    // Priorités :
+    // 1. caméra arrière mobile
+    // 2. webcam USB
+    // 3. sinon première caméra
+    let preferred = cams.find(c =>
+      c.label.toLowerCase().includes("back") ||
+      c.label.toLowerCase().includes("rear") ||
+      c.label.toLowerCase().includes("arrière")
+    );
+
+    if (!preferred) {
+      preferred = cams.find(c =>
+        c.label.toLowerCase().includes("usb") ||
+        c.label.toLowerCase().includes("webcam")
+      );
+    }
+
+    if (!preferred) preferred = cams[0];
+
+    console.log("Caméra utilisée :", preferred.label);
+
     videoStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 640, height: 480 }
+      video: {
+        deviceId: { exact: preferred.deviceId },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      }
     });
+
     preview.srcObject = videoStream;
     previewLoop();
     return true;
+
   } catch (e) {
     console.error("Erreur accès caméra :", e);
-    alert("Impossible d'accéder à la caméra. Vérifiez les permissions.");
+    alert("Impossible d'accéder à une caméra. Vérifiez les permissions.");
     return false;
   }
 }
