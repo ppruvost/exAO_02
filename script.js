@@ -200,6 +200,15 @@ async function listCameras() {
       opt.textContent = cam.label || "Caméra";
       select.appendChild(opt);
     });
+
+    // Auto-start de la première caméra
+    if (cams.length > 0) {
+      startCamera(cams[0].deviceId);
+    }
+
+    // Quand l'utilisateur change :
+    select.onchange = () => startCamera(select.value);
+
   } catch (e) {
     console.error("Erreur liste caméras :", e);
   }
@@ -215,3 +224,31 @@ async function startDefaultCamera() {
 }
 
 startDefaultCamera();
+
+/* ===================================================
+   CAMERA – START STREAM
+=================================================== */
+let currentStream = null;
+
+async function startCamera(deviceId) {
+  try {
+    if (currentStream) {
+      currentStream.getTracks().forEach(t => t.stop());
+    }
+
+    const constraints = deviceId
+      ? { video: { deviceId: { exact: deviceId } } }
+      : { video: true };
+
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    currentStream = stream;
+
+    const videoEl = document.getElementById("videoPreview");
+    videoEl.srcObject = stream;
+    await videoEl.play();
+
+  } catch (e) {
+    console.error("Erreur démarrage caméra :", e);
+  }
+}
+
