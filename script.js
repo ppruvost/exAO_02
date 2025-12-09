@@ -222,6 +222,33 @@ async function startDefaultCamera() {
     console.error("Permission caméra refusée", e);
   }
 }
+/* ===================================================
+   EVENTS BOUTONS (PATCH MINIMAL)
+=================================================== */
+
+document.getElementById("captureBgBtn").addEventListener("click", () => {
+  console.log("📸 Capturer le fond — TODO");
+});
+
+document.getElementById("startRecBtn").addEventListener("click", () => {
+  console.log("▶️ Démarrer enregistrement — TODO");
+});
+
+document.getElementById("stopRecBtn").addEventListener("click", () => {
+  console.log("⏹️ Arrêter — TODO");
+});
+
+document.getElementById("loadFileBtn").addEventListener("click", () => {
+  document.getElementById("fileInput").click();
+});
+
+document.getElementById("slowMoBtn").addEventListener("click", () => {
+  console.log("⏪ Ralenti ×0.25 — TODO");
+});
+
+document.getElementById("processBtn").addEventListener("click", () => {
+  console.log("⚙️ Traiter la vidéo enregistrée — TODO");
+});
 
 startDefaultCamera();
 
