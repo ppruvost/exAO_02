@@ -1,11 +1,5 @@
 /****************************************************
- *  script.js  — version complète corrigée
- *  - Chargement CSV
- *  - Extraction t, x, y
- *  - Calcul vitesse
- *  - Ajustement linéaire → accélération estimée
- *  - Calcul accélération théorique
- *  - Graphique vitesse + fit
+ *  script.js  — version corrigée (angle CSV + caméra)
  ****************************************************/
 
 /* ===================================================
@@ -36,18 +30,27 @@ function loadCSV(file, callback) {
 }
 
 /* ===================================================
+   EXTRACTION ANGLE VIA NOM DE FICHIER
+=================================================== */
+function extractAngleFromFilename(filename) {
+  const match = filename.match(/(\d+)deg/i);
+  if (!match) return null;
+  return parseInt(match[1], 10);
+}
+
+/* ===================================================
    CALCUL VITESSE + REGRESSION LINÉAIRE
 =================================================== */
 function estimateAcceleration(samples) {
   if (samples.length < 3) return null;
 
-  const v = []; // vitesses
+  const v = [];
 
   for (let i = 1; i < samples.length; i++) {
     const dt = samples[i].t - samples[i - 1].t;
     if (dt <= 0) continue;
 
-    const dx = samples[i].x - samples[i - 1].x; // mouvement sur x (rail)
+    const dx = samples[i].x - samples[i - 1].x;
     const vx = dx / dt;
 
     v.push({ t: samples[i].t, vx });
@@ -55,7 +58,6 @@ function estimateAcceleration(samples) {
 
   if (v.length < 2) return null;
 
-  // Régression linéaire vx(t)
   const n = v.length;
   let sumT = 0, sumV = 0, sumTV = 0, sumT2 = 0;
 
@@ -142,8 +144,22 @@ document.getElementById("csvFile").addEventListener("change", function () {
   const file = this.files[0];
   if (!file) return;
 
+  /* 🟧 EXTRACTION ANGLE AUTOMATIQUE DU NOM */
+  const angleFromName = extractAngleFromFilename(file.name);
+
+  if (angleFromName !== null) {
+    window.currentAngleDeg = angleFromName;
+    document.getElementById("angleValue").textContent = angleFromName + "°";
+
+    // Affichage dans la zone angle rampe
+    document.getElementById("rampAngleDisplay").textContent =
+      "Angle de la rampe : " + angleFromName + "°";
+
+    // Input angle utilisateur mis à jour
+    document.getElementById("angleInput").value = angleFromName;
+  }
+
   loadCSV(file, (samples) => {
-    // 🟦 Estimation accélération
     const result = estimateAcceleration(samples);
 
     if (!result) {
@@ -155,16 +171,47 @@ document.getElementById("csvFile").addEventListener("change", function () {
     const a_est = result.acceleration;
     const vData = result.vData;
 
-    // 🟧 Accélération théorique (angle détecté ailleurs dans ton script)
-    const thetaDeg = window.currentAngleDeg ?? 0; // si pas d'angle, = 0
+    const thetaDeg = window.currentAngleDeg ?? 0;
     const a_theo = computeTheoreticalAcceleration(thetaDeg);
 
-    // 🟩 Affichage
+    document.getElementById("nSamples").textContent = samples.length;
     document.getElementById("accelEst").textContent = a_est.toFixed(3) + " m/s²";
     document.getElementById("accelTheo").textContent = a_theo.toFixed(3) + " m/s²";
     document.getElementById("angleValue").textContent = thetaDeg.toFixed(1) + "°";
 
-    // 🟨 Graphique
     drawVelocityChart(vData, a_est);
   });
 });
+
+/* ===================================================
+   CAMERA – LISTE + STREAM
+=================================================== */
+async function listCameras() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d => d.kind === "videoinput");
+
+    const select = document.getElementById("cameraSelect");
+    select.innerHTML = "";
+
+    cams.forEach(cam => {
+      const opt = document.createElement("option");
+      opt.value = cam.deviceId;
+      opt.textContent = cam.label || "Caméra";
+      select.appendChild(opt);
+    });
+  } catch (e) {
+    console.error("Erreur liste caméras :", e);
+  }
+}
+
+async function startDefaultCamera() {
+  try {
+    await navigator.mediaDevices.getUserMedia({ video: true });
+    listCameras();
+  } catch (e) {
+    console.error("Permission caméra refusée", e);
+  }
+}
+
+startDefaultCamera();
